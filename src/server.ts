@@ -12,7 +12,13 @@ import {
   type SessionUser,
 } from "./auth.ts";
 import { VmUserManager } from "./vm-users.ts";
-import { cleanupSockets, handleRdpWsMessage, type RdpWsContext } from "./rdp-proxy.ts";
+import {
+  cleanupSockets,
+  createRdpWsContext,
+  handleRdpWsMessage,
+  rdpLog,
+  type RdpWsContext,
+} from "./rdp-proxy.ts";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -143,28 +149,33 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
       // WebSocket endpoint for browser IronRDP WASM <-> local xrdp
       if (pathname === "/api/rdp/ws") {
         if (!verifyWsOrigin(req, config)) {
+          console.warn(
+            `${new Date().toISOString()} [rdp] Blocked WebSocket upgrade: origin mismatch (origin=${req.headers.get("origin")}, expected=${getExternalOrigin(req, config)})`
+          );
           return jsonResponse({ error: "Invalid WebSocket origin" }, 403);
         }
         const session = getSessionFromRequest(req, config);
         if (!session) {
+          console.warn(`${new Date().toISOString()} [rdp] Blocked WebSocket upgrade: unauthenticated request`);
           return jsonResponse({ error: "Authentication required" }, 401);
         }
         const status = await vmUsers.getStatus(session.username);
         if (!status.provisioned) {
+          console.warn(
+            `${new Date().toISOString()} [rdp] Blocked WebSocket upgrade for '${session.username}': local VM user not provisioned (existsOnSystem=${status.existsOnSystem}, mode=${config.vmUserMode})`
+          );
           return jsonResponse({ error: "Local VM account must be initialized first" }, 403);
         }
 
-        const upgraded = srv.upgrade(req, {
-          data: {
-            user: session,
-            phase: "awaiting_x224",
-            tcpSocket: null,
-            tlsSocket: null,
-            rdpHost: config.rdpHost,
-            rdpPort: config.rdpPort,
-          },
-        });
-        if (upgraded) return undefined;
+        const wsCtx = createRdpWsContext(session, config);
+        const upgraded = srv.upgrade(req, { data: wsCtx });
+        if (upgraded) {
+          rdpLog(
+            wsCtx,
+            `WebSocket upgraded (email=${session.email}, vmUserMode=${config.vmUserMode}, existsOnSystem=${status.existsOnSystem})`
+          );
+          return undefined;
+        }
         return jsonResponse({ error: "WebSocket upgrade failed" }, 400);
       }
 
@@ -302,6 +313,9 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Failed to configure VM user";
+          console.error(
+            `${new Date().toISOString()} [vm-users] Failed configuring '${session.username}' (mode=${config.vmUserMode}): ${msg}`
+          );
           return jsonResponse({ error: msg }, 400);
         }
       }
@@ -355,7 +369,12 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
       message(ws, message) {
         handleRdpWsMessage(ws, message, config);
       },
-      close(ws) {
+      close(ws, code, reason) {
+        const elapsed = Date.now() - ws.data.openedAt;
+        rdpLog(
+          ws.data,
+          `Browser WebSocket closed (code=${code}, reason=${reason || "none"}, duration=${elapsed}ms, tx=${ws.data.txBytes}B, rx=${ws.data.rxBytes}B)`
+        );
         cleanupSockets(ws.data);
       },
     },
@@ -367,6 +386,10 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
 if (import.meta.main) {
   const { server, config } = createAppServer();
   console.log(
-    `[Apigee AI Demos] Listening on http://${server.hostname}:${server.port} (xrdp target: ${config.rdpHost}:${config.rdpPort}, user mode: ${config.vmUserMode})`
+    `[Apigee AI Demos] Listening on http://${server.hostname}:${server.port} | xrdp=${config.rdpHost}:${config.rdpPort} | vmUserMode=${config.vmUserMode}${
+      config.vmUserMode === "mock"
+        ? " (WARNING: mock mode does NOT create real Linux users for xrdp!)"
+        : ""
+    }`
   );
 }

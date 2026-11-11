@@ -265,7 +265,8 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
         onDraw: (px: Uint8Array, x: number, y: number, w: number, h: number) => void,
         onCursor: (kind: number) => void,
         onClip: (text: string) => void,
-        onTerm: (reason: string) => void
+        onTerm: (reason: string) => void,
+        onLog: (msg: string) => void
       ) => {
         start: () => void;
         on_tls_ready: (confirm: Uint8Array) => void;
@@ -291,6 +292,7 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
         packet.set(payload, 1);
         ws.send(packet);
       },
+      () => {},
       () => {},
       () => {},
       () => {},

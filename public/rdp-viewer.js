@@ -120,6 +120,7 @@ function ensureWasmInitialized() {
   return wasmReadyPromise;
 }
 
+const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 export class RdpViewer {
@@ -133,6 +134,9 @@ export class RdpViewer {
     this.ws = null;
     this.session = null;
     this.connected = false;
+    this.connectedAt = 0;
+    this.framesDrawn = 0;
+    this.pendingLogs = [];
     this.destroyed = false;
     this.cursorCanvas = document.createElement("canvas");
     this.cursorCtx = this.cursorCanvas.getContext("2d");
@@ -182,9 +186,29 @@ export class RdpViewer {
     return { width, height };
   }
 
+  sendClientLog(message) {
+    console.info("[rdp]", message);
+    const bytes = textEncoder.encode(message);
+    const packet = new Uint8Array(1 + bytes.length);
+    packet[0] = 0xfe;
+    packet.set(bytes, 1);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(packet);
+      } catch {
+        // Ignore
+      }
+    } else {
+      this.pendingLogs.push(packet);
+    }
+  }
+
   async connect({ username, password }) {
     this.disconnect();
     this.destroyed = false;
+    this.connectedAt = 0;
+    this.framesDrawn = 0;
+    this.pendingLogs = [];
     this.onStatus("connecting", "Loading WebAssembly RDP engine…");
 
     await ensureWasmInitialized();
@@ -213,6 +237,7 @@ export class RdpViewer {
         this.canvas.width = w;
         this.canvas.height = h;
         this.connected = true;
+        this.connectedAt = Date.now();
         this.onStatus("connected", `${w}×${h}`);
         this.canvas.focus();
       },
@@ -225,6 +250,7 @@ export class RdpViewer {
       // on_draw_rect(rgbaUint8Array, x, y, w, h)
       (pixels, x, y, w, h) => {
         if (!this.ctx || w === 0 || h === 0) return;
+        this.framesDrawn += 1;
         const clamped = new Uint8ClampedArray(
           pixels.buffer,
           pixels.byteOffset,
@@ -260,9 +286,22 @@ export class RdpViewer {
       },
       // on_terminated(reason)
       (reason) => {
+        const elapsed = this.connectedAt ? Date.now() - this.connectedAt : 0;
+        const shortLived = elapsed < 8000 || this.framesDrawn <= 2;
         this.connected = false;
-        this.onStatus("disconnected", reason || "Session ended");
+        if (shortLived) {
+          this.onStatus(
+            "error",
+            `xrdp closed the session (${reason || "disconnected"}). Verify your VM password and desktop session (/etc/xrdp/startwm.sh).`
+          );
+        } else {
+          this.onStatus("disconnected", reason || "Session ended");
+        }
         this.cleanupSessionOnly();
+      },
+      // on_log(msg)
+      (msg) => {
+        this.sendClientLog(msg);
       }
     );
 
@@ -276,9 +315,13 @@ export class RdpViewer {
 
     ws.addEventListener("open", () => {
       if (!this.session) return;
+      for (const pkt of this.pendingLogs.splice(0)) {
+        ws.send(pkt);
+      }
       try {
         this.session.start();
       } catch (err) {
+        this.sendClientLog(`start() error: ${err}`);
         this.onStatus("error", String(err));
         this.cleanupSessionOnly();
       }
@@ -308,18 +351,25 @@ export class RdpViewer {
           this.session.on_rdp_data(payload);
         }
       } catch (err) {
+        this.sendClientLog(`WASM error: ${err}`);
         this.connected = false;
         this.onStatus("error", String(err));
         this.cleanupSessionOnly();
       }
     });
 
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (ev) => {
       const wasConnected = this.connected;
+      const elapsed = this.connectedAt ? Date.now() - this.connectedAt : 0;
       this.connected = false;
       if (this.session) {
         this.cleanupSessionOnly();
-        if (wasConnected) {
+        if (!wasConnected || elapsed < 8000 || this.framesDrawn === 0) {
+          this.onStatus(
+            "error",
+            `xrdp closed the connection (${ev.reason || `code ${ev.code}`}). Check your VM password, VM_USER_MODE=system, and Bun server logs.`
+          );
+        } else {
           this.onStatus("disconnected", "Desktop connection closed");
         }
       }

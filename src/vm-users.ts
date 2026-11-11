@@ -166,6 +166,9 @@ export class VmUserManager {
           mockPasswordHash: `${salt}:${hash}`,
         };
         await this.writeRegistry(registry);
+        console.log(
+          `${nowIso} [vm-users] MOCK mode: ${created ? "created" : "updated password for"} mock user '${username}' (${email}) — note: Linux /etc/passwd was NOT modified`
+        );
         return {
           created,
           status: {
@@ -229,6 +232,9 @@ export class VmUserManager {
         passwordUpdatedAt: nowIso,
       };
       await this.writeRegistry(registry);
+      console.log(
+        `${nowIso} [vm-users] SYSTEM mode: ${created ? "created Linux user" : "updated Linux password for"} '${username}' (uid=${sysAfter.uid ?? "?"}, home=${sysAfter.homeDir})`
+      );
 
       return {
         created,

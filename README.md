@@ -1,91 +1,67 @@
 # Apigee AI Demos
 
-Minimalist web portal and browser-based `xrdp` workstation gateway built on **Bun**, **Vanilla HTML/CSS/JS**, and **IronRDP (WebAssembly)**.
+Browser-based `xrdp` workstation portal with `@google.com` login, built on **Bun** and **IronRDP (WebAssembly)**.
 
-All RDP protocol decoding and desktop rendering run client-side in the user's browser via WebAssembly—keeping server memory and CPU overhead minimal on the Debian VM with **no `guacd`, no Java/Tomcat, and no database**.
+## Getting Started (Debian VM)
 
-## Features
+### 1. Prepare `xrdp` on the VM
 
-- **Google Identity (`@google.com` only)**: OAuth 2.0 / OIDC Authorization Code + PKCE flow restricting sign-in to verified `@google.com` accounts.
-- **Automatic Local VM User Provisioning**:
-  - Maps `<username>@google.com` to a validated POSIX Linux username (`<username>`).
-  - Prompts first-time users to set their local Linux/xrdp password (`useradd` + `chpasswd` over stdin—never stored in plaintext on the server).
-  - Allows users to rotate/change their local VM password at any time from the top bar.
-  - Supports an optional `SETUP_USER_SCRIPT` hook (`<script> <username> <homedir>`) for customizing home directories on first login.
-- **In-App & New-Tab Browser RDP (`xrdp`)**:
-  - Connects to the local `xrdp` daemon (`127.0.0.1:3389`) over TLS + PAM autologon, resuming existing Linux sessions seamlessly.
-  - Supports embedded workspace viewing, one-click **Open in new tab** (`/desktop`) with live session handoff, dynamic window resize (`DisplayControl`), hardware cursor rendering, `Ctrl+Alt+Del`, fullscreen, and bidirectional text clipboard (`CLIPRDR`).
-- **Extensible Shell**: Ready to host additional Apigee AI demo scenarios and documentation links in the left navigation rail.
-
-## Quick Start (Local Development)
-
-For local UI/API testing on a development machine without modifying `/etc/passwd`:
+Make sure `xrdp` can read its TLS key and has a desktop session to launch for newly created users:
 
 ```bash
-ALLOW_DEV_AUTH=true VM_USER_MODE=mock bun run dev
+# Allow xrdp to read /etc/xrdp/key.pem for TLS
+sudo adduser xrdp ssl-cert
+sudo systemctl restart xrdp xrdp-sesman
 ```
 
-Open `http://127.0.0.1:8080` and sign in with any `@google.com` test address.
-
-Run the automated test suite (auth, CSRF, VM user provisioning, and end-to-end IronRDP WASM + TLS handshake):
+### 2. Configure `.env`
 
 ```bash
-bun test
+cp .env.example .env
 ```
 
-## Production Deployment on Debian VM (with Caddy & `xrdp`)
+Edit `.env`:
 
-### 1. Verify `xrdp` TLS configuration
+```env
+HOST=127.0.0.1
+PORT=8080
+PUBLIC_BASE_URL=https://your-domain.com
+SESSION_SECRET=replace-with-openssl-rand-hex-32
 
-Ensure `xrdp` is running on `127.0.0.1:3389` with TLS negotiation enabled in `/etc/xrdp/xrdp.ini` (the Debian default):
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
 
-```ini
-[Globals]
-security_layer=negotiate
-certificate=/etc/xrdp/cert.pem
-key_file=/etc/xrdp/key.pem
+VM_USER_MODE=system
+USE_SUDO=true   # set false if running bun as root
 ```
 
-*(Ensure the `xrdp` user can read `/etc/xrdp/key.pem`, e.g. `sudo adduser xrdp ssl-cert && sudo systemctl restart xrdp`.)*
+*(In Google Cloud Console, add `https://your-domain.com/api/auth/google/callback` as an Authorized Redirect URI. If running as a non-root user with `USE_SUDO=true`, allow passwordless `/usr/sbin/useradd` and `/usr/sbin/chpasswd` as in `deploy/sudoers.example`.)*
 
-### 2. Configure Google OAuth 2.0 Credentials
-
-1. In Google Cloud Console -> **APIs & Services -> Credentials**, create an **OAuth 2.0 Client ID** (*Web application*).
-2. Add the authorized redirect URI:
-   ```text
-   https://demos.yourdomain.com/api/auth/google/callback
-   ```
-3. Copy `.env.example` to `.env` and set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `PUBLIC_BASE_URL=https://demos.yourdomain.com`, and `SESSION_SECRET` (`openssl rand -hex 32`).
-
-### 3. Run the Bun Service (`systemd`)
-
-Copy this repository to `/opt/apigee-ai-demos` and install [deploy/apigee-ai-demos.service](./deploy/apigee-ai-demos.service):
-
-```bash
-sudo cp deploy/apigee-ai-demos.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now apigee-ai-demos
-```
-
-*(To run as an unprivileged user instead of `root`, set `USE_SUDO=true` in `.env` and install [deploy/sudoers.example](./deploy/sudoers.example).)*
-
-### 4. Configure Caddy Reverse Proxy
-
-Point Caddy at `127.0.0.1:8080` ([deploy/Caddyfile.example](./deploy/Caddyfile.example)):
+### 3. Configure Caddy
 
 ```caddyfile
-demos.yourdomain.com {
+your-domain.com {
     encode zstd gzip
     reverse_proxy 127.0.0.1:8080
 }
 ```
 
-Caddy automatically terminates HTTPS, upgrades `/api/rdp/ws` WebSockets (`wss://`), and provides the browser Secure Context needed for clipboard integration.
-
-## Rebuilding the IronRDP WebAssembly Module
-
-`public/wasm/` already includes the compiled release WASM bundle. To rebuild from `wasm/src/lib.rs`:
+### 4. Start the Server
 
 ```bash
-bun run build:wasm
+bun run start
 ```
+
+*(For local UI testing without Google OAuth or real Linux users: `ALLOW_DEV_AUTH=true VM_USER_MODE=mock bun run dev`)*
+
+## Troubleshooting Black Screen / Immediate Disconnect
+
+Check the Bun console output and `sudo tail -f /var/log/xrdp.log /var/log/xrdp-sesman.log`:
+
+1. **`VM_USER_MODE=mock` left enabled on the VM**: Mock mode does not create real Linux users or set Linux passwords, so `xrdp-sesman` immediately closes the session after the RDP handshake. Use `VM_USER_MODE=system`.
+2. **Desktop session exits immediately (`/etc/xrdp/startwm.sh`)**: On Debian, unset conflicting D-Bus variables before `Xsession` runs in `/etc/xrdp/startwm.sh`:
+   ```sh
+   unset DBUS_SESSION_BUS_ADDRESS
+   unset XDG_RUNTIME_DIR
+   ```
+   Also ensure a desktop environment (e.g. `xfce4`) is installed and the same Linux user is not already logged into a local graphical session on the VM.

@@ -65,8 +65,9 @@ export class RdpSession {
      * @param {Function} on_cursor
      * @param {Function} on_clipboard
      * @param {Function} on_terminated
+     * @param {Function} on_log
      */
-    constructor(width, height, username, password, domain, on_send, on_connected, on_resize, on_draw_rect, on_cursor, on_clipboard, on_terminated) {
+    constructor(width, height, username, password, domain, on_send, on_connected, on_resize, on_draw_rect, on_cursor, on_clipboard, on_terminated, on_log) {
         const val4 = +width;
         const val5 = +height;
         let ptr0, len0, ptr1, len1, ptr2, len2;
@@ -83,7 +84,7 @@ export class RdpSession {
             if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
             throw e;
         }
-        const ret = wasm.rdpsession_new(val4, val5, ptr0, len0, ptr1, len1, ptr2, len2, on_send, on_connected, on_resize, on_draw_rect, on_cursor, on_clipboard, on_terminated);
+        const ret = wasm.rdpsession_new(val4, val5, ptr0, len0, ptr1, len1, ptr2, len2, on_send, on_connected, on_resize, on_draw_rect, on_cursor, on_clipboard, on_terminated, on_log);
         this.__wbg_ptr = ret;
         RdpSessionFinalization.register(this, this.__wbg_ptr, this);
         return this;

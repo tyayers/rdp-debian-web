@@ -15,8 +15,7 @@ use ironrdp_connector::connection_activation::{
     ConnectionActivationFactory, ConnectionActivationSequence, ConnectionActivationState,
 };
 use ironrdp_connector::{
-    BitmapConfig, ClientConnector, ClientConnectorState, Config, Credentials, DesktopSize,
-    Sequence as _,
+    ClientConnector, ClientConnectorState, Config, Credentials, DesktopSize, Sequence as _,
 };
 use ironrdp_core::{IntoOwned as _, WriteBuf};
 use ironrdp_displaycontrol::client::DisplayControlClient;
@@ -28,8 +27,8 @@ use ironrdp_input::{
 use ironrdp_pdu::gcc::KeyboardType;
 use ironrdp_pdu::geometry::InclusiveRectangle;
 use ironrdp_pdu::mcs;
-use ironrdp_pdu::rdp::capability_sets::{BitmapCodecs, MajorPlatformType};
-use ironrdp_pdu::rdp::client_info::{CompressionType, PerformanceFlags, TimezoneInfo};
+use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
+use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp_pdu::x224::X224;
 use ironrdp_pdu::{Action, find_size};
 use ironrdp_session::image::DecodedImage;
@@ -187,6 +186,7 @@ struct HostCallbacks {
     on_cursor: Function,
     on_clipboard: Function,
     on_terminated: Function,
+    on_log: Function,
 }
 
 #[wasm_bindgen]
@@ -198,6 +198,7 @@ pub struct RdpSession {
     deferred_frames: VecDeque<(Action, Vec<u8>)>,
     blit_buf: Vec<u8>,
     clip_state: Arc<Mutex<SharedClipState>>,
+    rendered_frames: u64,
     cb: HostCallbacks,
 }
 
@@ -218,6 +219,7 @@ impl RdpSession {
         on_cursor: Function,
         on_clipboard: Function,
         on_terminated: Function,
+        on_log: Function,
     ) -> Self {
         let safe_w = width.clamp(320, 4096) & !1;
         let safe_h = height.clamp(240, 4096);
@@ -237,7 +239,7 @@ impl RdpSession {
             keyboard_type: KeyboardType::IbmEnhanced,
             keyboard_subtype: 0,
             keyboard_functional_keys_count: 12,
-            keyboard_layout: 0x0409,
+            keyboard_layout: 0, // Must be 0 when ClientInfoPdu code_page is 0
             ime_file_name: String::new(),
             dig_product_id: String::new(),
             desktop_size: DesktopSize {
@@ -245,12 +247,8 @@ impl RdpSession {
                 height: safe_h,
             },
             desktop_scale_factor: 0,
-            bitmap: Some(BitmapConfig {
-                lossy_compression: true,
-                color_depth: 32,
-                codecs: BitmapCodecs::default(),
-            }),
-            client_build: 26100,
+            bitmap: None, // Uses default RemoteFX + uncompressed/RLE/RDP6 codec capabilities
+            client_build: 0,
             client_name: "apigee-web".to_owned(),
             client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
             platform: MajorPlatformType::UNIX,
@@ -261,7 +259,7 @@ impl RdpSession {
             performance_flags: PerformanceFlags::default(),
             license_cache: None,
             timezone_info: TimezoneInfo::default(),
-            compression_type: Some(CompressionType::Rdp61),
+            compression_type: None, // Avoid MPPC/XCRUSH bulk compression issues with xrdp on localhost
             enable_server_pointer: true,
             pointer_software_rendering: false,
             multitransport_flags: None,
@@ -292,6 +290,7 @@ impl RdpSession {
             deferred_frames: VecDeque::new(),
             blit_buf: Vec::with_capacity(65536),
             clip_state,
+            rendered_frames: 0,
             cb: HostCallbacks {
                 on_send,
                 on_connected,
@@ -300,19 +299,26 @@ impl RdpSession {
                 on_cursor,
                 on_clipboard,
                 on_terminated,
+                on_log,
             },
         }
     }
 
     pub fn start(&mut self) -> Result<(), JsValue> {
-        let Stage::Connecting(connector) = &mut self.stage else {
-            return Err(JsValue::from_str("session already started"));
-        };
         let mut out = WriteBuf::new();
-        let written = connector
-            .step_no_input(&mut out)
-            .map_err(|e| JsValue::from_str(&format!("RDP initiation failed: {e}")))?;
+        let written = {
+            let Stage::Connecting(connector) = &mut self.stage else {
+                return Err(JsValue::from_str("session already started"));
+            };
+            connector
+                .step_no_input(&mut out)
+                .map_err(|e| JsValue::from_str(&format!("RDP initiation failed: {e}")))?
+        };
         if written.size().is_some() {
+            self.emit_log(&format!(
+                "Sent X.224 Connection Request ({} bytes)",
+                out.filled_len()
+            ));
             self.emit_send(1, out.filled());
         }
         Ok(())
@@ -320,7 +326,7 @@ impl RdpSession {
 
     pub fn on_tls_ready(&mut self, x224_confirm: &[u8]) -> Result<(), JsValue> {
         let mut out = WriteBuf::new();
-        {
+        let next_state_name = {
             let Stage::Connecting(connector) = &mut self.stage else {
                 return Err(JsValue::from_str("unexpected TLS upgrade response"));
             };
@@ -330,7 +336,11 @@ impl RdpSession {
             if connector.should_perform_security_upgrade() {
                 connector.mark_security_upgrade_as_done();
             }
-        }
+            connector.state().name()
+        };
+        self.emit_log(&format!(
+            "TLS upgrade acknowledged; advancing connector -> {next_state_name}"
+        ));
         if out.filled_len() > 0 {
             self.emit_send(0, out.filled());
         }
@@ -339,7 +349,10 @@ impl RdpSession {
     }
 
     pub fn on_rdp_data(&mut self, chunk: &[u8]) -> Result<(), JsValue> {
-        self.on_rdp_data_inner(chunk).map_err(|e| JsValue::from_str(&e))
+        self.on_rdp_data_inner(chunk).map_err(|e| {
+            self.emit_log(&format!("ERROR in on_rdp_data: {e}"));
+            JsValue::from_str(&e)
+        })
     }
 
     pub fn mouse_move(&mut self, x: u16, y: u16) {
@@ -388,38 +401,48 @@ impl RdpSession {
     }
 
     pub fn release_all(&mut self) {
-        let Stage::Active { stage, .. } = &mut self.stage else {
-            return;
+        let outputs = {
+            let Stage::Active { stage, .. } = &mut self.stage else {
+                return;
+            };
+            let events = self.input_db.release_all();
+            if events.is_empty() {
+                return;
+            }
+            stage.process_fastpath_input(&mut self.image, &events).ok()
         };
-        let events = self.input_db.release_all();
-        if events.is_empty() {
-            return;
-        }
-        if let Ok(outputs) = stage.process_fastpath_input(&mut self.image, &events) {
+        if let Some(outputs) = outputs {
             let _ = self.handle_stage_outputs(outputs);
         }
     }
 
     pub fn sync_locks(&mut self, scroll: bool, num: bool, caps: bool) {
-        let Stage::Active { stage, .. } = &mut self.stage else {
-            return;
+        let outputs = {
+            let Stage::Active { stage, .. } = &mut self.stage else {
+                return;
+            };
+            let ev = ironrdp_input::synchronize_event(scroll, num, caps, false);
+            stage.process_fastpath_input(&mut self.image, &[ev]).ok()
         };
-        let ev = ironrdp_input::synchronize_event(scroll, num, caps, false);
-        if let Ok(outputs) = stage.process_fastpath_input(&mut self.image, &[ev]) {
+        if let Some(outputs) = outputs {
             let _ = self.handle_stage_outputs(outputs);
         }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        let Stage::Active { stage, .. } = &mut self.stage else {
-            return;
+        let frame_opt = {
+            let Stage::Active { stage, .. } = &mut self.stage else {
+                return;
+            };
+            let adj_w = width.clamp(320, 4096) & !1;
+            let adj_h = height.clamp(240, 4096);
+            if adj_w == u32::from(self.image.width()) && adj_h == u32::from(self.image.height()) {
+                return;
+            }
+            stage.encode_resize(adj_w, adj_h, None, None)
         };
-        let adj_w = width.clamp(320, 4096) & !1;
-        let adj_h = height.clamp(240, 4096);
-        if adj_w == u32::from(self.image.width()) && adj_h == u32::from(self.image.height()) {
-            return;
-        }
-        if let Some(Ok(frame)) = stage.encode_resize(adj_w, adj_h, None, None) {
+        if let Some(Ok(frame)) = frame_opt {
+            self.emit_log(&format!("Requested DisplayControl resize to {width}x{height}"));
             self.emit_send(0, &frame);
         }
     }
@@ -453,9 +476,14 @@ impl RdpSession {
         let _ = self.cb.on_send.call2(&JsValue::NULL, &JsValue::from(kind), &arr);
     }
 
+    fn emit_log(&self, msg: &str) {
+        let _ = self.cb.on_log.call1(&JsValue::NULL, &JsValue::from_str(msg));
+    }
+
     fn drive_no_input_steps(&mut self) -> Result<(), String> {
         loop {
             let mut outbound: Option<Vec<u8>> = None;
+            let mut log_line: Option<String> = None;
             match &mut self.stage {
                 Stage::Connecting(connector) => {
                     if connector.state().is_terminal()
@@ -465,10 +493,15 @@ impl RdpSession {
                     {
                         break;
                     }
+                    let prev_state = connector.state().name();
                     let mut out = WriteBuf::new();
                     let written = connector
                         .step_no_input(&mut out)
-                        .map_err(|e| format!("RDP handshake error ({}): {e}", connector.state().name()))?;
+                        .map_err(|e| format!("RDP handshake error ({prev_state}): {e}"))?;
+                    let next_state = connector.state().name();
+                    if prev_state != next_state {
+                        log_line = Some(format!("Connector step: {prev_state} -> {next_state}"));
+                    }
                     if written.size().is_some() {
                         outbound = Some(out.filled().to_vec());
                     }
@@ -477,15 +510,23 @@ impl RdpSession {
                     if seq.state().is_terminal() || seq.next_pdu_hint().is_some() {
                         break;
                     }
+                    let prev_state = seq.state().name();
                     let mut out = WriteBuf::new();
                     let written = seq
                         .step_no_input(&mut out)
-                        .map_err(|e| format!("RDP reactivation error: {e}"))?;
+                        .map_err(|e| format!("RDP reactivation error ({prev_state}): {e}"))?;
+                    let next_state = seq.state().name();
+                    if prev_state != next_state {
+                        log_line = Some(format!("Reactivation step: {prev_state} -> {next_state}"));
+                    }
                     if written.size().is_some() {
                         outbound = Some(out.filled().to_vec());
                     }
                 }
                 Stage::Active { .. } | Stage::Terminated => break,
+            }
+            if let Some(line) = log_line {
+                self.emit_log(&line);
             }
             if let Some(bytes) = outbound {
                 self.emit_send(0, &bytes);
@@ -518,6 +559,7 @@ impl RdpSession {
             self.image = DecodedImage::new(PixelFormat::RgbA32, width, height);
 
             let io_channel_id = result.io_channel_id;
+            let share_id = result.share_id;
             let activation_factory = result.activation_factory;
             let active_stage = ActiveStageBuilder {
                 static_channels: result.static_channels,
@@ -536,6 +578,10 @@ impl RdpSession {
                 activation_factory,
                 io_channel_id,
             };
+
+            self.emit_log(&format!(
+                "Entered ActiveStage ({width}x{height}, io_channel={io_channel_id}, share_id={share_id})"
+            ));
 
             let _ = self.cb.on_connected.call2(
                 &JsValue::NULL,
@@ -569,6 +615,10 @@ impl RdpSession {
             } = seq.connection_activation_state()
             {
                 stage.set_share_id(share_id);
+                self.emit_log(&format!(
+                    "Completed Deactivate-Reactivate sequence ({}x{}, share_id={share_id})",
+                    desktop_size.width, desktop_size.height
+                ));
                 if desktop_size.width != self.image.width() || desktop_size.height != self.image.height() {
                     self.image = DecodedImage::new(
                         PixelFormat::RgbA32,
@@ -631,6 +681,7 @@ impl RdpSession {
             let frame: Vec<u8> = self.rx_buf.drain(..pdu_info.length).collect();
 
             let mut outbound: Option<Vec<u8>> = None;
+            let mut log_line: Option<String> = None;
             match &mut self.stage {
                 Stage::Connecting(connector) => {
                     if pdu_info.action == Action::FastPath {
@@ -647,10 +698,15 @@ impl RdpSession {
                         }
                     }
 
+                    let prev_state = connector.state().name();
                     let mut out = WriteBuf::new();
                     let written = connector
                         .step(&frame, &mut out)
-                        .map_err(|e| format!("RDP connection failed ({}): {e}", connector.state().name()))?;
+                        .map_err(|e| format!("RDP connection failed ({prev_state}): {e}"))?;
+                    let next_state = connector.state().name();
+                    if prev_state != next_state {
+                        log_line = Some(format!("Connector PDU: {prev_state} -> {next_state}"));
+                    }
                     if written.size().is_some() {
                         outbound = Some(out.filled().to_vec());
                     }
@@ -664,10 +720,15 @@ impl RdpSession {
                         self.deferred_frames.push_back((pdu_info.action, frame));
                         continue;
                     }
+                    let prev_state = seq.state().name();
                     let mut out = WriteBuf::new();
                     let written = seq
                         .step(&frame, &mut out)
-                        .map_err(|e| format!("RDP reactivation step failed: {e}"))?;
+                        .map_err(|e| format!("RDP reactivation step failed ({prev_state}): {e}"))?;
+                    let next_state = seq.state().name();
+                    if prev_state != next_state {
+                        log_line = Some(format!("Reactivation PDU: {prev_state} -> {next_state}"));
+                    }
                     if written.size().is_some() {
                         outbound = Some(out.filled().to_vec());
                     }
@@ -679,6 +740,9 @@ impl RdpSession {
                 Stage::Terminated => break,
             }
 
+            if let Some(line) = log_line {
+                self.emit_log(&line);
+            }
             if let Some(bytes) = outbound {
                 self.emit_send(0, &bytes);
             }
@@ -696,7 +760,7 @@ impl RdpSession {
             };
             stage
                 .process(&mut self.image, action, frame)
-                .map_err(|e| format!("RDP session error: {e}"))?
+                .map_err(|e| format!("RDP session error ({action:?}, {} bytes): {e}", frame.len()))?
         };
 
         self.handle_stage_outputs(outputs)?;
@@ -711,6 +775,13 @@ impl RdpSession {
                     self.emit_send(0, &frame);
                 }
                 ActiveStageOutput::GraphicsUpdate(rect) => {
+                    self.rendered_frames += 1;
+                    if self.rendered_frames == 1 {
+                        self.emit_log(&format!(
+                            "Rendered first desktop graphics update ({}..{}, {}..{})",
+                            rect.left, rect.right, rect.top, rect.bottom
+                        ));
+                    }
                     self.blit_rect(&rect);
                 }
                 ActiveStageOutput::PointerDefault => {
@@ -732,6 +803,7 @@ impl RdpSession {
                     let _ = self.cb.on_cursor.apply(&JsValue::NULL, &args);
                 }
                 ActiveStageOutput::DeactivateAll => {
+                    self.emit_log("Received Server DeactivateAll PDU; starting reactivation");
                     let Stage::Active {
                         stage,
                         activation_factory,
@@ -751,7 +823,11 @@ impl RdpSession {
                     break;
                 }
                 ActiveStageOutput::Terminate(reason) => {
-                    let msg = format!("{reason:?}");
+                    let msg = reason.to_string();
+                    self.emit_log(&format!(
+                        "Session terminated by server (rendered_frames={}): {msg}",
+                        self.rendered_frames
+                    ));
                     self.stage = Stage::Terminated;
                     let _ = self
                         .cb
