@@ -6,7 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import tls from "node:tls";
 import { deriveLinuxUsername } from "../src/auth.ts";
+import { loadConfig } from "../src/config.ts";
 import { createAppServer } from "../src/server.ts";
+import { VmUserManager } from "../src/vm-users.ts";
 
 async function generateSelfSignedPem(dir: string): Promise<{ key: string; cert: string }> {
   const keyPath = path.join(dir, "xrdp-test.key");
@@ -143,6 +145,25 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
     expect(() => deriveLinuxUsername("user@gmail.com", "google.com")).toThrow();
     expect(() => deriveLinuxUsername("root@google.com", "google.com")).toThrow();
     expect(() => deriveLinuxUsername("xrdp@google.com", "google.com")).toThrow();
+  });
+
+  test("system mode detects existing Linux user directly and defaults useSudo when non-root", async () => {
+    const cfg = loadConfig({
+      SESSION_SECRET: "test-secret",
+      VM_USER_MODE: "system",
+      DATA_DIR: path.join(tmpDir, "sys-data"),
+      NODE_ENV: "test",
+    });
+    if (typeof process.getuid === "function" && process.getuid() !== 0) {
+      expect(cfg.useSudo).toBe(true);
+    }
+    const currentUser = os.userInfo().username;
+    if (/^[a-z_][a-z0-9_-]{0,31}$/.test(currentUser) && os.userInfo().uid >= 1000) {
+      const sysMgr = new VmUserManager(cfg);
+      const status = await sysMgr.getStatus(currentUser);
+      expect(status.existsOnSystem).toBe(true);
+      expect(status.provisioned).toBe(true);
+    }
   });
 
   test("Google OAuth login endpoint enforces hd=google.com and PKCE S256", async () => {

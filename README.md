@@ -32,10 +32,9 @@ GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 
 VM_USER_MODE=system
-USE_SUDO=true   # set false if running bun as root
 ```
 
-*(In Google Cloud Console, add `https://your-domain.com/api/auth/google/callback` as an Authorized Redirect URI. If running as a non-root user with `USE_SUDO=true`, allow passwordless `/usr/sbin/useradd` and `/usr/sbin/chpasswd` as in `deploy/sudoers.example`.)*
+*(In Google Cloud Console, add `https://your-domain.com/api/auth/google/callback` as an Authorized Redirect URI. For `useradd` / `chpasswd` to create users and reset passwords, either run `sudo bun run start` or ensure your VM user has passwordless `sudo`—see `deploy/sudoers.example`.)*
 
 ### 3. Configure Caddy
 

@@ -73,6 +73,7 @@ const el = {
   rdpPasswordInput: document.getElementById("current-password"),
   toggleRdpPasswordBtn: document.getElementById("toggle-rdp-password"),
   rdpConnectBtn: document.getElementById("rdp-connect-btn"),
+  resetRdpPasswordBtn: document.getElementById("reset-rdp-password-btn"),
 
   passwordDialog: document.getElementById("password-dialog"),
   closePasswordDialogBtn: document.getElementById("close-password-dialog-btn"),
@@ -421,12 +422,14 @@ async function bootstrap() {
     }
   });
 
-  // Change VM password modal
-  el.openPasswordModalBtn.addEventListener("click", () => {
+  // Change / reset VM password modal (from top bar or connect card)
+  const openPasswordDialog = () => {
     setBanner(el.passwordModalAlert, "");
     el.modalNewPasswordInput.value = "";
     el.passwordDialog.showModal();
-  });
+  };
+  el.openPasswordModalBtn.addEventListener("click", openPasswordDialog);
+  el.resetRdpPasswordBtn.addEventListener("click", openPasswordDialog);
   el.closePasswordDialogBtn.addEventListener("click", () => el.passwordDialog.close());
   el.cancelPasswordDialogBtn.addEventListener("click", () => el.passwordDialog.close());
 
@@ -443,6 +446,12 @@ async function bootstrap() {
       state.ephemeralVmPassword = newPassword;
       el.rdpPasswordInput.value = newPassword;
       el.passwordDialog.close();
+      if (!state.viewer?.connected) {
+        setBanner(
+          el.rdpErrorBanner,
+          `Linux password updated for '${state.user.username}'. Click Connect to desktop to sign in.`
+        );
+      }
     } catch (err) {
       setBanner(el.passwordModalAlert, err.message);
     } finally {

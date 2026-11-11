@@ -232,6 +232,12 @@ code {
   flex-direction: column;
 }
 
+.stacked-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
 .field-group {
   display: flex;
   flex-direction: column;

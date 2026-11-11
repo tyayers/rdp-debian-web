@@ -37,7 +37,8 @@ function parsePort(value: string | undefined, fallback: number): number {
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
   const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
-  const useSudo = parseBool(env.USE_SUDO, false);
+  // Automatically use `sudo -n` when not running as root unless explicitly disabled via USE_SUDO=false
+  const useSudo = !isRoot && parseBool(env.USE_SUDO, true);
 
   let vmUserMode: VmUserMode = isRoot || useSudo ? "system" : "system";
   if (env.VM_USER_MODE === "mock") {

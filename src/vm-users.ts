@@ -23,6 +23,13 @@ interface ProvisionedRecord {
 
 type RegistryMap = Record<string, ProvisionedRecord>;
 
+interface SystemUserLookup {
+  exists: boolean;
+  inEtcPasswd: boolean;
+  uid?: number;
+  homeDir: string;
+}
+
 export function validateVmPassword(password: string): string | null {
   if (typeof password !== "string" || password.length < 8) {
     return "Password must be at least 8 characters long.";
@@ -85,25 +92,67 @@ export class VmUserManager {
     }
   }
 
-  private async lookupPasswdEntry(
-    username: string
-  ): Promise<{ exists: boolean; uid?: number; homeDir: string }> {
+  private parsePasswdLine(line: string, username: string): { uid?: number; homeDir: string } {
+    const fields = line.trim().split(":");
+    const uid = Number.parseInt(fields[2] ?? "", 10);
+    const homeDir = fields[5] || `/home/${username}`;
+    return {
+      uid: Number.isNaN(uid) ? undefined : uid,
+      homeDir,
+    };
+  }
+
+  private async lookupSystemUser(username: string): Promise<SystemUserLookup> {
     assertSafeUsername(username);
+    const prefix = `${username}:`;
+
+    // 1. Check local /etc/passwd first
     try {
       const passwd = await fs.readFile("/etc/passwd", "utf8");
-      const prefix = `${username}:`;
       for (const line of passwd.split("\n")) {
         if (line.startsWith(prefix)) {
-          const fields = line.split(":");
-          const uid = Number.parseInt(fields[2] ?? "", 10);
-          const homeDir = fields[5] || `/home/${username}`;
-          return { exists: true, uid, homeDir };
+          const parsed = this.parsePasswdLine(line, username);
+          return {
+            exists: true,
+            inEtcPasswd: true,
+            uid: parsed.uid,
+            homeDir: parsed.homeDir,
+          };
         }
       }
     } catch {
-      // Fallback if /etc/passwd unreadable
+      // Continue to getent fallback
     }
-    return { exists: false, homeDir: `/home/${username}` };
+
+    // 2. Check NSS (e.g. getent passwd <username> for LDAP / OS Login / SSSD accounts)
+    try {
+      const proc = Bun.spawn(["getent", "passwd", "--", username], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "ignore",
+      });
+      const [code, stdout] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+      ]);
+      if (code === 0 && stdout.startsWith(prefix)) {
+        const parsed = this.parsePasswdLine(stdout.split("\n")[0]!, username);
+        return {
+          exists: true,
+          inEtcPasswd: false,
+          uid: parsed.uid,
+          homeDir: parsed.homeDir,
+        };
+      }
+    } catch {
+      // getent unavailable
+    }
+
+    return {
+      exists: false,
+      inEtcPasswd: false,
+      homeDir: `/home/${username}`,
+    };
   }
 
   async getStatus(username: string): Promise<VmUserStatus> {
@@ -122,16 +171,17 @@ export class VmUserManager {
       };
     }
 
-    const sys = await this.lookupPasswdEntry(username);
+    const sys = await this.lookupSystemUser(username);
     // Prevent modifying pre-existing low-UID system accounts (< 1000)
     if (sys.exists && sys.uid !== undefined && sys.uid < 1000) {
       throw new Error(`Account '${username}' conflicts with a system UID (${sys.uid})`);
     }
 
+    // If the Linux user already exists on the VM, use it directly without forcing creation
     return {
       username,
       existsOnSystem: sys.exists,
-      provisioned: sys.exists && Boolean(record),
+      provisioned: sys.exists,
       homeDir: sys.homeDir,
       createdAt: record?.createdAt ?? null,
       passwordUpdatedAt: record?.passwordUpdatedAt ?? null,
@@ -182,7 +232,7 @@ export class VmUserManager {
         };
       }
 
-      const sysBefore = await this.lookupPasswdEntry(username);
+      const sysBefore = await this.lookupSystemUser(username);
       if (sysBefore.exists && sysBefore.uid !== undefined && sysBefore.uid < 1000) {
         throw new Error(`Account '${username}' conflicts with a system UID (${sysBefore.uid})`);
       }
@@ -191,6 +241,9 @@ export class VmUserManager {
       let created = false;
 
       if (!sysBefore.exists) {
+        console.log(
+          `${nowIso} [vm-users] User '${username}' not found on system; creating via ${this.config.useSudo ? "sudo useradd" : "useradd"}`
+        );
         const useraddArgs = [
           ...cmdPrefix,
           "/usr/sbin/useradd",
@@ -205,16 +258,22 @@ export class VmUserManager {
 
         await this.execCommand(useraddArgs, undefined, "Failed to create local VM user");
         created = true;
+      } else {
+        console.log(
+          `${nowIso} [vm-users] User '${username}' already exists on system (uid=${sysBefore.uid ?? "?"}, inEtcPasswd=${sysBefore.inEtcPasswd}); skipping useradd and updating password`
+        );
       }
 
-      // Update user password via chpasswd stdin (never expose password in process argv)
+      // Set or reset user password via chpasswd stdin (never expose password in process argv)
       await this.execCommand(
         [...cmdPrefix, "/usr/sbin/chpasswd"],
         `${username}:${password}\n`,
-        "Failed to set local VM password"
+        sysBefore.exists && !sysBefore.inEtcPasswd
+          ? `Failed to set local password (account '${username}' is managed outside /etc/passwd, e.g. OS Login/LDAP)`
+          : "Failed to set local VM password"
       );
 
-      const sysAfter = await this.lookupPasswdEntry(username);
+      const sysAfter = await this.lookupSystemUser(username);
 
       // Optional hook for future home-directory customization
       if (created && this.config.setupUserScript) {
@@ -233,7 +292,7 @@ export class VmUserManager {
       };
       await this.writeRegistry(registry);
       console.log(
-        `${nowIso} [vm-users] SYSTEM mode: ${created ? "created Linux user" : "updated Linux password for"} '${username}' (uid=${sysAfter.uid ?? "?"}, home=${sysAfter.homeDir})`
+        `${nowIso} [vm-users] SYSTEM mode: ${created ? "created Linux user and set password for" : "reset/updated Linux password for"} '${username}' (uid=${sysAfter.uid ?? "?"}, home=${sysAfter.homeDir})`
       );
 
       return {
@@ -273,7 +332,14 @@ export class VmUserManager {
 
     if (exitCode !== 0) {
       const detail = stderr.trim() || `exit code ${exitCode}`;
-      throw new Error(`${errorContext}: ${detail}`);
+      const needsPrivilegeHint =
+        /permission denied|cannot lock \/etc\/passwd|a password is required|must be root|authentication failure/i.test(
+          detail
+        );
+      const hint = needsPrivilegeHint
+        ? " (Run the server with root privileges, e.g. 'sudo bun run start', or allow passwordless sudo for /usr/sbin/useradd and /usr/sbin/chpasswd in /etc/sudoers.d/)"
+        : "";
+      throw new Error(`${errorContext}: ${detail}${hint}`);
     }
   }
 }
