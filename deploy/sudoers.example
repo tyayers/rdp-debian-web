@@ -1,0 +1,3 @@
+# Optional least-privilege config if running the Bun service as user "apigee-portal" instead of root:
+# Install via: visudo -f /etc/sudoers.d/apigee-ai-demos
+apigee-portal ALL=(root) NOPASSWD: /usr/sbin/useradd, /usr/sbin/chpasswd

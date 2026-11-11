@@ -1,0 +1,19 @@
+# /etc/systemd/system/apigee-ai-demos.service
+[Unit]
+Description=Apigee AI Demos Web Portal & xrdp Gateway
+After=network.target xrdp.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/apigee-ai-demos
+EnvironmentFile=/opt/apigee-ai-demos/.env
+ExecStart=/usr/local/bin/bun run src/server.ts
+Restart=on-failure
+RestartSec=3
+
+# If running as a dedicated user (e.g. User=apigee-portal), set USE_SUDO=true in .env
+# and install deploy/sudoers.example to /etc/sudoers.d/apigee-ai-demos
+User=root
+
+[Install]
+WantedBy=multi-user.target

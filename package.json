@@ -1,0 +1,13 @@
+{
+  "name": "apigee-ai-demos",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Apigee AI Demos portal with Google (@google.com) auth, VM user provisioning, and browser-based IronRDP WASM access to xrdp",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch run src/server.ts",
+    "test": "bun test",
+    "build:wasm": "cd wasm && cargo build --release --target wasm32-unknown-unknown && rm -rf ../public/wasm && wasm-bindgen target/wasm32-unknown-unknown/release/rdp_wasm.wasm --target web --no-typescript --out-dir ../public/wasm"
+  }
+}

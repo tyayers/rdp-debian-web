@@ -1,0 +1,31 @@
+[package]
+name = "rdp-wasm"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "=0.2.130"
+js-sys = "0.3"
+ironrdp-core = "0.2"
+ironrdp-pdu = "0.9"
+ironrdp-connector = "0.10"
+ironrdp-session = "0.11"
+ironrdp-graphics = "0.9"
+ironrdp-input = "0.7"
+ironrdp-svc = "0.8"
+ironrdp-dvc = "0.8"
+ironrdp-displaycontrol = "0.8"
+ironrdp-cliprdr = "0.7"
+
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
