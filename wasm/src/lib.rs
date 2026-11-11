@@ -19,7 +19,10 @@ use ironrdp_connector::{
 };
 use ironrdp_core::{IntoOwned as _, WriteBuf};
 use ironrdp_displaycontrol::client::DisplayControlClient;
-use ironrdp_dvc::DrdynvcClient;
+use ironrdp_displaycontrol::pdu::{
+    DisplayControlMonitorLayout, DisplayControlPdu, MonitorLayoutEntry, MonitorOrientation,
+};
+use ironrdp_dvc::{DrdynvcClient, encode_dvc_messages};
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_input::{
     Database as InputDatabase, MouseButton, MousePosition, Operation, Scancode, WheelRotations,
@@ -29,10 +32,15 @@ use ironrdp_pdu::geometry::InclusiveRectangle;
 use ironrdp_pdu::mcs;
 use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+use ironrdp_pdu::rdp::headers::{
+    BASIC_SECURITY_HEADER_SIZE, BasicSecurityHeaderFlags, ShareDataPdu, decode_share_data,
+};
+use ironrdp_pdu::rdp::server_error_info::{ErrorInfo, ProtocolIndependentCode, ServerSetErrorInfoPdu};
 use ironrdp_pdu::x224::X224;
 use ironrdp_pdu::{Action, find_size};
 use ironrdp_session::image::DecodedImage;
-use ironrdp_session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
+use ironrdp_session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput, fast_path};
+use ironrdp_svc::ChannelFlags;
 use js_sys::{Date, Function, Uint8Array};
 use wasm_bindgen::prelude::*;
 
@@ -48,6 +56,13 @@ enum ClipAction {
 struct SharedClipState {
     local_text: String,
     actions: VecDeque<ClipAction>,
+}
+
+#[derive(Debug, Default)]
+struct DisplayControlState {
+    ready: bool,
+    max_monitor_area: Option<u64>,
+    just_became_ready: bool,
 }
 
 #[derive(Debug)]
@@ -178,6 +193,32 @@ enum Stage {
     Terminated,
 }
 
+#[derive(Debug)]
+enum X224FrameKind {
+    /// MCS DisconnectProviderUltimatum from server
+    Disconnect(mcs::DisconnectReason),
+    /// Non-IO static virtual channel or message channel (e.g. drdynvc, cliprdr, autodetect)
+    NonIoChannel,
+    /// Server Deactivate All PDU (including XRDP's compact 6-byte header-only variant!)
+    DeactivateAll,
+    /// Server Demand Active PDU
+    DemandActive,
+    /// Finalization ShareDataPdu (Synchronize, Control, FontMap)
+    FinalizationData,
+    /// ServerSetErrorInfo(None)
+    ErrorInfoNone,
+    /// ServerSetErrorInfo(non-None error)
+    FatalErrorInfo(String),
+    /// Normal active-session ShareDataPdu (Update, Pointer, SaveSessionInfo, SetKeyboardIndicators, ShutdownDenied)
+    ActiveSessionData,
+    /// Multitransport request on IO channel
+    IoMultitransport,
+    /// Unrecognized or benign ShareDataPdu (e.g. PlaySound)
+    OtherShareData,
+    /// Other X.224 / MCS handshake frame (during initial connection before CapabilitiesExchange)
+    OtherHandshake,
+}
+
 struct HostCallbacks {
     on_send: Function,
     on_connected: Function,
@@ -198,6 +239,9 @@ pub struct RdpSession {
     deferred_frames: VecDeque<(Action, Vec<u8>)>,
     blit_buf: Vec<u8>,
     clip_state: Arc<Mutex<SharedClipState>>,
+    disp_state: Arc<Mutex<DisplayControlState>>,
+    pending_resize: Option<(u32, u32)>,
+    last_requested_resize: Option<(u32, u32)>,
     rendered_frames: u64,
     cb: HostCallbacks,
 }
@@ -268,12 +312,22 @@ impl RdpSession {
         };
 
         let clip_state = Arc::new(Mutex::new(SharedClipState::default()));
+        let disp_state = Arc::new(Mutex::new(DisplayControlState::default()));
+
         let clip_backend = Box::new(WasmClipBackend {
             shared: Arc::clone(&clip_state),
         });
         let cliprdr = CliprdrClient::new(clip_backend);
-        let dvc =
-            DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
+
+        let disp_state_cb = Arc::clone(&disp_state);
+        let dvc = DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(move |caps| {
+            if let Ok(mut guard) = disp_state_cb.lock() {
+                guard.ready = true;
+                guard.max_monitor_area = Some(caps.max_monitor_area());
+                guard.just_became_ready = true;
+            }
+            Ok(Vec::new())
+        }));
 
         let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 49152);
         let connector = ClientConnector::new(config, client_addr)
@@ -290,6 +344,9 @@ impl RdpSession {
             deferred_frames: VecDeque::new(),
             blit_buf: Vec::with_capacity(65536),
             clip_state,
+            disp_state,
+            pending_resize: None,
+            last_requested_resize: None,
             rendered_frames: 0,
             cb: HostCallbacks {
                 on_send,
@@ -430,21 +487,9 @@ impl RdpSession {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        let frame_opt = {
-            let Stage::Active { stage, .. } = &mut self.stage else {
-                return;
-            };
-            let adj_w = width.clamp(320, 4096) & !1;
-            let adj_h = height.clamp(240, 4096);
-            if adj_w == u32::from(self.image.width()) && adj_h == u32::from(self.image.height()) {
-                return;
-            }
-            stage.encode_resize(adj_w, adj_h, None, None)
-        };
-        if let Some(Ok(frame)) = frame_opt {
-            self.emit_log(&format!("Requested DisplayControl resize to {width}x{height}"));
-            self.emit_send(0, &frame);
-        }
+        let (adj_w, adj_h) = self.normalize_resize_dims(width, height);
+        self.pending_resize = Some((adj_w, adj_h));
+        self.flush_pending_resize();
     }
 
     pub fn copy_text(&mut self, text: &str) {
@@ -478,6 +523,167 @@ impl RdpSession {
 
     fn emit_log(&self, msg: &str) {
         let _ = self.cb.on_log.call1(&JsValue::NULL, &JsValue::from_str(msg));
+    }
+
+    fn emit_terminate(&mut self, reason: &str) {
+        self.emit_log(&format!(
+            "Session terminated by server (rendered_frames={}): {reason}",
+            self.rendered_frames
+        ));
+        self.stage = Stage::Terminated;
+        let _ = self
+            .cb
+            .on_terminated
+            .call1(&JsValue::NULL, &JsValue::from_str(reason));
+    }
+
+    fn normalize_resize_dims(&self, width: u32, height: u32) -> (u32, u32) {
+        let clamped_w = width.clamp(320, 4096);
+        let clamped_h = height.clamp(240, 4096);
+        let (mut adj_w, mut adj_h) = MonitorLayoutEntry::adjust_display_size(clamped_w, clamped_h);
+
+        let max_area = self
+            .disp_state
+            .lock()
+            .ok()
+            .and_then(|g| g.max_monitor_area)
+            .unwrap_or(0);
+
+        if max_area > 0 {
+            let area = u64::from(adj_w) * u64::from(adj_h);
+            if area > max_area {
+                let scale = (max_area as f64 / area as f64).sqrt();
+                let scaled_w = ((adj_w as f64) * scale).floor() as u32;
+                let scaled_h = ((adj_h as f64) * scale).floor() as u32;
+                (adj_w, adj_h) = MonitorLayoutEntry::adjust_display_size(
+                    scaled_w.max(320),
+                    scaled_h.max(240),
+                );
+            }
+        }
+
+        (adj_w, adj_h)
+    }
+
+    fn flush_pending_resize(&mut self) {
+        let mut became_ready_msg: Option<u64> = None;
+        let is_ready = if let Ok(mut guard) = self.disp_state.lock() {
+            if guard.just_became_ready {
+                guard.just_became_ready = false;
+                became_ready_msg = guard.max_monitor_area;
+            }
+            guard.ready
+        } else {
+            false
+        };
+
+        if let Some(max_area) = became_ready_msg {
+            self.emit_log(&format!(
+                "DisplayControl dynamic channel ready (max_monitor_area={max_area})"
+            ));
+        }
+
+        let Some((req_w, req_h)) = self.pending_resize else {
+            return;
+        };
+
+        let (adj_w, adj_h) = self.normalize_resize_dims(req_w, req_h);
+
+        // Wait until ActiveStage is active and DisplayControl has received server capabilities
+        if !is_ready {
+            self.pending_resize = Some((adj_w, adj_h));
+            return;
+        }
+
+        let encode_result: Option<Result<Vec<u8>, String>> = {
+            let Stage::Active { stage, .. } = &mut self.stage else {
+                // Keep pending_resize queued until Connecting / Reactivating finishes
+                self.pending_resize = Some((adj_w, adj_h));
+                return;
+            };
+
+            if adj_w == u32::from(self.image.width()) && adj_h == u32::from(self.image.height()) {
+                self.pending_resize = None;
+                self.last_requested_resize = None;
+                return;
+            }
+
+            if self.last_requested_resize == Some((adj_w, adj_h)) {
+                self.pending_resize = None;
+                return;
+            }
+
+            let channel_id_opt = stage
+                .get_dvc::<DisplayControlClient>()
+                .and_then(|dvc| {
+                    let dc = dvc.channel_processor_downcast_ref::<DisplayControlClient>()?;
+                    if dc.ready() { dvc.channel_id() } else { None }
+                });
+
+            let Some(channel_id) = channel_id_opt else {
+                self.pending_resize = Some((adj_w, adj_h));
+                return;
+            };
+
+            // Always use MonitorOrientation::Landscape (0°) so narrow/split browser windows
+            // (where width <= height) never trigger a 90° sideways rotation in xorgxrdp!
+            let res = (|| -> Result<Vec<u8>, String> {
+                let entry = MonitorLayoutEntry::new_primary(adj_w, adj_h)
+                    .map_err(|e| format!("MonitorLayoutEntry error: {e}"))?
+                    .with_orientation(MonitorOrientation::Landscape);
+                let layout = DisplayControlMonitorLayout::new(&[entry])
+                    .map_err(|e| format!("DisplayControlMonitorLayout error: {e}"))?;
+                let pdu = DisplayControlPdu::MonitorLayout(layout);
+                let svc_messages =
+                    encode_dvc_messages(channel_id, vec![Box::new(pdu)], ChannelFlags::empty())
+                        .map_err(|e| format!("encode_dvc_messages error: {e}"))?;
+                stage
+                    .encode_dvc_messages(svc_messages)
+                    .map_err(|e| format!("stage.encode_dvc_messages error: {e}"))
+            })();
+
+            Some(res)
+        };
+
+        if let Some(result) = encode_result {
+            self.pending_resize = None;
+            match result {
+                Ok(frame) => {
+                    self.last_requested_resize = Some((adj_w, adj_h));
+                    self.emit_log(&format!(
+                        "Requested DisplayControl resize to {adj_w}x{adj_h}"
+                    ));
+                    self.emit_send(0, &frame);
+                }
+                Err(err) => {
+                    self.emit_log(&format!("DisplayControl resize encode failed: {err}"));
+                }
+            }
+        }
+    }
+
+    fn start_reactivation(&mut self) -> Result<(), String> {
+        self.emit_log("Received Server DeactivateAll PDU; starting reactivation");
+        self.last_requested_resize = None;
+        // Release any pressed keys/buttons cleanly across mode switch
+        let _ = self.input_db.release_all();
+
+        let Stage::Active {
+            stage,
+            activation_factory,
+            io_channel_id,
+        } = core::mem::replace(&mut self.stage, Stage::Terminated)
+        else {
+            return Ok(());
+        };
+        let seq = activation_factory.create();
+        self.stage = Stage::Reactivating {
+            seq: Box::new(seq),
+            stage,
+            activation_factory,
+            io_channel_id,
+        };
+        self.drive_no_input_steps()
     }
 
     fn drive_no_input_steps(&mut self) -> Result<(), String> {
@@ -590,6 +796,7 @@ impl RdpSession {
             );
 
             self.drain_deferred_frames()?;
+            self.flush_pending_resize();
         }
 
         let needs_finish_reactivation = matches!(
@@ -611,26 +818,41 @@ impl RdpSession {
             if let ConnectionActivationState::Finalized {
                 desktop_size,
                 share_id,
-                ..
+                enable_server_pointer,
+                pointer_software_rendering,
             } = seq.connection_activation_state()
             {
+                // Rebuild fast_path::Processor with the updated share_id & fresh codec state,
+                // matching Devolutions' official ironrdp-client implementation!
+                stage.set_fastpath_processor(
+                    fast_path::ProcessorBuilder {
+                        io_channel_id: seq.io_channel_id(),
+                        user_channel_id: seq.user_channel_id(),
+                        share_id,
+                        enable_server_pointer,
+                        pointer_software_rendering,
+                        bulk_decompressor: None,
+                    }
+                    .build(),
+                );
                 stage.set_share_id(share_id);
+                stage.set_enable_server_pointer(enable_server_pointer);
+
                 self.emit_log(&format!(
                     "Completed Deactivate-Reactivate sequence ({}x{}, share_id={share_id})",
                     desktop_size.width, desktop_size.height
                 ));
-                if desktop_size.width != self.image.width() || desktop_size.height != self.image.height() {
-                    self.image = DecodedImage::new(
-                        PixelFormat::RgbA32,
-                        desktop_size.width,
-                        desktop_size.height,
-                    );
-                    let _ = self.cb.on_resize.call2(
-                        &JsValue::NULL,
-                        &JsValue::from(u32::from(desktop_size.width)),
-                        &JsValue::from(u32::from(desktop_size.height)),
-                    );
-                }
+
+                self.image = DecodedImage::new(
+                    PixelFormat::RgbA32,
+                    desktop_size.width,
+                    desktop_size.height,
+                );
+                let _ = self.cb.on_resize.call2(
+                    &JsValue::NULL,
+                    &JsValue::from(u32::from(desktop_size.width)),
+                    &JsValue::from(u32::from(desktop_size.height)),
+                );
             }
 
             self.stage = Stage::Active {
@@ -640,6 +862,7 @@ impl RdpSession {
             };
 
             self.drain_deferred_frames()?;
+            self.flush_pending_resize();
         }
 
         Ok(())
@@ -692,9 +915,41 @@ impl RdpSession {
                         &connector.state
                     {
                         let expected_io = connection_activation.io_channel_id();
-                        if is_non_io_svc_indication(&frame, expected_io) {
-                            self.deferred_frames.push_back((Action::X224, frame));
-                            continue;
+                        let kind = classify_x224_frame(&frame, expected_io);
+                        match kind {
+                            X224FrameKind::Disconnect(reason) => {
+                                let msg = reason.description().to_owned();
+                                self.emit_terminate(&msg);
+                                break;
+                            }
+                            X224FrameKind::FatalErrorInfo(desc) => {
+                                self.emit_terminate(&desc);
+                                break;
+                            }
+                            X224FrameKind::NonIoChannel => {
+                                self.deferred_frames.push_back((Action::X224, frame));
+                                continue;
+                            }
+                            X224FrameKind::DeactivateAll => {
+                                // Ignore compact 6-byte or full DeactivateAll during initial activation
+                                continue;
+                            }
+                            X224FrameKind::ActiveSessionData => {
+                                if matches!(
+                                    connection_activation.connection_activation_state(),
+                                    ConnectionActivationState::ConnectionFinalization { .. }
+                                ) {
+                                    self.deferred_frames.push_back((Action::X224, frame));
+                                }
+                                continue;
+                            }
+                            X224FrameKind::OtherShareData | X224FrameKind::IoMultitransport => {
+                                continue;
+                            }
+                            X224FrameKind::DemandActive
+                            | X224FrameKind::FinalizationData
+                            | X224FrameKind::ErrorInfoNone
+                            | X224FrameKind::OtherHandshake => {}
                         }
                     }
 
@@ -712,14 +967,83 @@ impl RdpSession {
                     }
                 }
                 Stage::Reactivating {
-                    seq, io_channel_id, ..
+                    seq,
+                    activation_factory,
+                    io_channel_id,
+                    ..
                 } => {
-                    if pdu_info.action == Action::FastPath
-                        || is_non_io_svc_indication(&frame, *io_channel_id)
-                    {
-                        self.deferred_frames.push_back((pdu_info.action, frame));
+                    let act_state = seq.connection_activation_state();
+                    if pdu_info.action == Action::FastPath {
+                        // Drop stale FastPath frames belonging to the deactivated resolution;
+                        // defer FastPath frames arriving after ServerDemandActive.
+                        if matches!(
+                            act_state,
+                            ConnectionActivationState::ConnectionFinalization { .. }
+                        ) {
+                            self.deferred_frames.push_back((Action::FastPath, frame));
+                        }
                         continue;
                     }
+
+                    let kind = classify_x224_frame(&frame, *io_channel_id);
+                    match kind {
+                        X224FrameKind::Disconnect(reason) => {
+                            let msg = reason.description().to_owned();
+                            self.emit_terminate(&msg);
+                            break;
+                        }
+                        X224FrameKind::FatalErrorInfo(desc) => {
+                            self.emit_terminate(&desc);
+                            break;
+                        }
+                        X224FrameKind::NonIoChannel => {
+                            // Preserve SVC / DVC / clipboard traffic across reactivation
+                            self.deferred_frames.push_back((Action::X224, frame));
+                            continue;
+                        }
+                        X224FrameKind::DeactivateAll => {
+                            if matches!(
+                                act_state,
+                                ConnectionActivationState::ConnectionFinalization { .. }
+                            ) {
+                                // Server initiated a fresh DeactivateAll mid-finalization;
+                                // keep only non-IO SVC frames and restart CapabilitiesExchange.
+                                let io_id = *io_channel_id;
+                                self.deferred_frames.retain(|(act, f)| {
+                                    *act == Action::X224
+                                        && matches!(
+                                            classify_x224_frame(f, io_id),
+                                            X224FrameKind::NonIoChannel
+                                        )
+                                });
+                                **seq = activation_factory.create();
+                            }
+                            continue;
+                        }
+                        X224FrameKind::ActiveSessionData => {
+                            if matches!(
+                                act_state,
+                                ConnectionActivationState::ConnectionFinalization { .. }
+                            ) {
+                                // xrdp often sends Pointer / SetKeyboardIndicators / SaveSessionInfo
+                                // before FontMap; defer them until ActiveStage resumes.
+                                self.deferred_frames.push_back((Action::X224, frame));
+                            }
+                            continue;
+                        }
+                        X224FrameKind::OtherShareData | X224FrameKind::IoMultitransport => {
+                            continue;
+                        }
+                        X224FrameKind::FinalizationData | X224FrameKind::ErrorInfoNone => {
+                            if matches!(act_state, ConnectionActivationState::CapabilitiesExchange)
+                            {
+                                // Stale PDU from previous share before DemandActive
+                                continue;
+                            }
+                        }
+                        X224FrameKind::DemandActive | X224FrameKind::OtherHandshake => {}
+                    }
+
                     let prev_state = seq.state().name();
                     let mut out = WriteBuf::new();
                     let written = seq
@@ -750,10 +1074,36 @@ impl RdpSession {
         }
 
         self.flush_clipboard_actions()?;
+        self.flush_pending_resize();
         Ok(())
     }
 
     fn process_active_frame(&mut self, action: Action, frame: &[u8]) -> Result<(), String> {
+        if action == Action::X224 {
+            let io_channel_id = match &self.stage {
+                Stage::Active { io_channel_id, .. } => *io_channel_id,
+                _ => return Ok(()),
+            };
+
+            match classify_x224_frame(frame, io_channel_id) {
+                X224FrameKind::DeactivateAll => {
+                    // Intercepts both XRDP's 6-byte header-only DeactivateAll PDU (which omits shareId
+                    // and would otherwise fail ShareControlHeader::decode) and standard 10/13-byte forms!
+                    return self.start_reactivation();
+                }
+                X224FrameKind::Disconnect(reason) => {
+                    let msg = reason.description().to_owned();
+                    self.emit_terminate(&msg);
+                    return Ok(());
+                }
+                X224FrameKind::FinalizationData | X224FrameKind::OtherShareData => {
+                    // Safely ignore redundant Synchronize/Control/FontMap/PlaySound PDUs in ActiveStage
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         let outputs = {
             let Stage::Active { stage, .. } = &mut self.stage else {
                 return Ok(());
@@ -765,6 +1115,7 @@ impl RdpSession {
 
         self.handle_stage_outputs(outputs)?;
         self.flush_clipboard_actions()?;
+        self.flush_pending_resize();
         Ok(())
     }
 
@@ -803,36 +1154,12 @@ impl RdpSession {
                     let _ = self.cb.on_cursor.apply(&JsValue::NULL, &args);
                 }
                 ActiveStageOutput::DeactivateAll => {
-                    self.emit_log("Received Server DeactivateAll PDU; starting reactivation");
-                    let Stage::Active {
-                        stage,
-                        activation_factory,
-                        io_channel_id,
-                    } = core::mem::replace(&mut self.stage, Stage::Terminated)
-                    else {
-                        break;
-                    };
-                    let seq = activation_factory.create();
-                    self.stage = Stage::Reactivating {
-                        seq: Box::new(seq),
-                        stage,
-                        activation_factory,
-                        io_channel_id,
-                    };
-                    self.drive_no_input_steps()?;
+                    self.start_reactivation()?;
                     break;
                 }
                 ActiveStageOutput::Terminate(reason) => {
                     let msg = reason.to_string();
-                    self.emit_log(&format!(
-                        "Session terminated by server (rendered_frames={}): {msg}",
-                        self.rendered_frames
-                    ));
-                    self.stage = Stage::Terminated;
-                    let _ = self
-                        .cb
-                        .on_terminated
-                        .call1(&JsValue::NULL, &JsValue::from_str(&msg));
+                    self.emit_terminate(&msg);
                     break;
                 }
                 _ => {}
@@ -979,7 +1306,7 @@ impl RdpSession {
             let events = self.input_db.apply(ops);
             if events.is_empty() {
                 return;
-            }
+            };
             stage.process_fastpath_input(&mut self.image, &events).ok()
         };
         if let Some(outputs) = outputs {
@@ -988,11 +1315,159 @@ impl RdpSession {
     }
 }
 
-fn is_non_io_svc_indication(frame: &[u8], io_channel_id: u16) -> bool {
-    if let Ok(x224) = ironrdp_core::decode::<X224<mcs::McsMessage<'_>>>(frame)
-        && let mcs::McsMessage::SendDataIndication(ind) = x224.0
-    {
-        return ind.channel_id != io_channel_id;
+fn classify_x224_frame(frame: &[u8], io_channel_id: u16) -> X224FrameKind {
+    let Ok(x224) = ironrdp_core::decode::<X224<mcs::McsMessage<'_>>>(frame) else {
+        return X224FrameKind::OtherHandshake;
+    };
+
+    match x224.0 {
+        mcs::McsMessage::DisconnectProviderUltimatum(ult) => {
+            X224FrameKind::Disconnect(ult.reason)
+        }
+        mcs::McsMessage::SendDataIndication(ind) => {
+            if ind.channel_id != io_channel_id {
+                return X224FrameKind::NonIoChannel;
+            }
+
+            let user_data = ind.user_data;
+
+            // Check Multitransport header on IO channel
+            if user_data.len() >= BASIC_SECURITY_HEADER_SIZE {
+                let flags_raw = u16::from_le_bytes([user_data[0], user_data[1]]);
+                let flags_hi = u16::from_le_bytes([user_data[2], user_data[3]]);
+                if flags_hi == 0
+                    && let Some(flags) = BasicSecurityHeaderFlags::from_bits(flags_raw)
+                    && flags.contains(BasicSecurityHeaderFlags::TRANSPORT_REQ)
+                {
+                    return X224FrameKind::IoMultitransport;
+                }
+            }
+
+            // Inspect ShareControlHeader 6-byte prefix (totalLength:u16, pduType:u16, pduSource:u16).
+            // XRDP sends a 6-byte DeactivateAll PDU without shareId (0x06, 0x00, 0x16, 0x00, ...).
+            if user_data.len() >= 6 {
+                let pdu_type_raw = u16::from_le_bytes([user_data[2], user_data[3]]);
+                let version = pdu_type_raw & !0x000F;
+                let pdu_type = pdu_type_raw & 0x000F;
+                if version == 0x0010 {
+                    match pdu_type {
+                        0x0006 => return X224FrameKind::DeactivateAll,
+                        0x0001 => return X224FrameKind::DemandActive,
+                        0x0007 => {
+                            if let Ok(data_ctx) = mcs::decode_send_data_indication(frame)
+                                && let Ok(share_ctx) = decode_share_data(data_ctx)
+                            {
+                                return match share_ctx.pdu {
+                                    ShareDataPdu::Synchronize(_)
+                                    | ShareDataPdu::Control(_)
+                                    | ShareDataPdu::FontMap(_) => X224FrameKind::FinalizationData,
+                                    ShareDataPdu::ServerSetErrorInfo(ServerSetErrorInfoPdu(
+                                        ErrorInfo::ProtocolIndependentCode(
+                                            ProtocolIndependentCode::None,
+                                        ),
+                                    )) => X224FrameKind::ErrorInfoNone,
+                                    ShareDataPdu::ServerSetErrorInfo(ServerSetErrorInfoPdu(
+                                        err,
+                                    )) => X224FrameKind::FatalErrorInfo(err.description()),
+                                    ShareDataPdu::Update(_)
+                                    | ShareDataPdu::Pointer(_)
+                                    | ShareDataPdu::SaveSessionInfo(_)
+                                    | ShareDataPdu::SetKeyboardIndicators(_)
+                                    | ShareDataPdu::ShutdownDenied => {
+                                        X224FrameKind::ActiveSessionData
+                                    }
+                                    _ => X224FrameKind::OtherShareData,
+                                };
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            X224FrameKind::OtherHandshake
+        }
+        _ => X224FrameKind::OtherHandshake,
     }
-    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironrdp_pdu::mcs::SendDataIndication;
+    use ironrdp_pdu::rdp::finalization_messages::FontPdu;
+    use ironrdp_pdu::rdp::headers::{ServerDeactivateAll, ShareControlPdu, encode_share_control, encode_share_data};
+    use std::borrow::Cow;
+
+    fn wrap_send_data_indication(initiator_id: u16, channel_id: u16, payload: &[u8]) -> Vec<u8> {
+        let msg = mcs::McsMessage::SendDataIndication(SendDataIndication {
+            initiator_id,
+            channel_id,
+            user_data: Cow::Borrowed(payload),
+        });
+        ironrdp_core::encode_vec(&X224(msg)).expect("encode SendDataIndication")
+    }
+
+    #[test]
+    fn classifies_xrdp_compact_6_byte_deactivate_all() {
+        // XRDP sends a 6-byte ShareControlHeader for DeactivateAll omitting shareId and sourceDescriptor
+        let xrdp_short_deactivate: [u8; 6] = [0x06, 0x00, 0x16, 0x00, 0xea, 0x03];
+        let frame = wrap_send_data_indication(1002, 1003, &xrdp_short_deactivate);
+
+        assert!(matches!(
+            classify_x224_frame(&frame, 1003),
+            X224FrameKind::DeactivateAll
+        ));
+    }
+
+    #[test]
+    fn classifies_standard_deactivate_all_and_share_data_pdus() {
+        // Standard 13-byte ServerDeactivateAll
+        let mut buf = WriteBuf::new();
+        encode_share_control(
+            1002,
+            1003,
+            0x0001_03ea,
+            ShareControlPdu::ServerDeactivateAll(ServerDeactivateAll),
+            &mut buf,
+        )
+        .unwrap();
+        // Convert SendDataRequest (0x64 = domainMCSPDU 25) to SendDataIndication (0x68 = domainMCSPDU 26)
+        let mut std_deact = buf.filled().to_vec();
+        std_deact[7] = (26 << 2) | (std_deact[7] & 0x03);
+        assert!(matches!(
+            classify_x224_frame(&std_deact, 1003),
+            X224FrameKind::DeactivateAll
+        ));
+
+        // Non-IO channel SVC frame
+        let svc_frame = wrap_send_data_indication(1002, 1005, &[1, 2, 3, 4]);
+        assert!(matches!(
+            classify_x224_frame(&svc_frame, 1003),
+            X224FrameKind::NonIoChannel
+        ));
+
+        // FontMap finalization frame
+        buf.clear();
+        encode_share_data(1002, 1003, 0x0001_03ea, ShareDataPdu::FontMap(FontPdu::default()), &mut buf)
+            .unwrap();
+        let mut font_map = buf.filled().to_vec();
+        font_map[7] = (26 << 2) | (font_map[7] & 0x03);
+        assert!(matches!(
+            classify_x224_frame(&font_map, 1003),
+            X224FrameKind::FinalizationData
+        ));
+    }
+
+    #[test]
+    fn narrow_window_layout_preserves_landscape_orientation() {
+        let (w, h) = MonitorLayoutEntry::adjust_display_size(801, 960);
+        assert_eq!((w, h), (800, 960));
+        let entry = MonitorLayoutEntry::new_primary(w, h)
+            .unwrap()
+            .with_orientation(MonitorOrientation::Landscape);
+        assert_eq!(entry.orientation(), Some(MonitorOrientation::Landscape));
+        let layout = DisplayControlMonitorLayout::new(&[entry]).unwrap();
+        assert_eq!(layout.monitors().len(), 1);
+    }
 }

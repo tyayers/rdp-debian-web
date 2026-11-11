@@ -47,11 +47,30 @@ your-domain.com {
 
 ### 4. Start the Server
 
+**Option A — Compile a standalone binary and run with `sudo` (Recommended):**
+
 ```bash
+bun run build
+sudo ./apigee-ai-demos
+```
+
+*(All HTML, CSS, JS, WASM assets, and the default `scripts/on-connect.sh` hook are embedded into `./apigee-ai-demos`, and it automatically loads `.env` from the current directory—so `sudo` does not need `bun` in `root`'s `PATH`. If `./scripts/on-connect.sh` is present on disk, edits to it take effect immediately on the next RDP connect without recompiling.)*
+
+**Option B — Run directly with Bun:**
+
+```bash
+# As a user with passwordless sudo:
 bun run start
+
+# Or as root:
+sudo "$(which bun)" run start
 ```
 
 *(For local UI testing without Google OAuth or real Linux users: `ALLOW_DEV_AUTH=true VM_USER_MODE=mock bun run dev`)*
+
+## Per-Connect Desktop Enforcement (`scripts/on-connect.sh`)
+
+Every time a user connects to RDP, the server runs `./scripts/on-connect.sh <username> <homedir>` (configurable via `ON_CONNECT_SCRIPT` in `.env`) before opening the `xrdp` session. By default, it enforces **Terminal** and **Firefox** in the **LXQt** default panel Quick Launch favorites (`~/.config/lxqt/panel.conf`). Add additional per-connect policies at the bottom of `scripts/on-connect.sh`.
 
 ## Troubleshooting Black Screen / Immediate Disconnect
 

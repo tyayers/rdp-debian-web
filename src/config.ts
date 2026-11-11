@@ -20,6 +20,7 @@ export interface AppConfig {
   vmUserShell: string;
   vmUserGroups: string[];
   setupUserScript: string | null;
+  onConnectScript: string | null;
   dataDir: string;
   publicDir: string;
 }
@@ -57,7 +58,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     }
   }
 
-  const projectRoot = path.resolve(import.meta.dir, "..");
+  const isCompiledBinary = import.meta.dir.startsWith("/$bunfs");
+  const baseDir = isCompiledBinary ? process.cwd() : path.resolve(import.meta.dir, "..");
+
+  const rawOnConnect = env.ON_CONNECT_SCRIPT?.trim();
+  const onConnectScript =
+    rawOnConnect && ["false", "none", "off", "0"].includes(rawOnConnect.toLowerCase())
+      ? null
+      : rawOnConnect
+        ? path.resolve(baseDir, rawOnConnect)
+        : path.join(baseDir, "scripts", "on-connect.sh");
 
   return {
     port: parsePort(env.PORT, 8080),
@@ -79,7 +89,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       .map((g) => g.trim())
       .filter(Boolean),
     setupUserScript: env.SETUP_USER_SCRIPT?.trim() || null,
-    dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : path.join(projectRoot, "data"),
-    publicDir: path.join(projectRoot, "public"),
+    onConnectScript,
+    dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : path.join(baseDir, "data"),
+    publicDir: path.join(baseDir, "public"),
   };
 }

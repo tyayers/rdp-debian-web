@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "./config.ts";
 import { POSIX_USERNAME_RE, RESERVED_USERNAMES } from "./auth.ts";
+import { EMBEDDED_ON_CONNECT_SCRIPT } from "./embedded-assets.ts";
 
 export interface VmUserStatus {
   username: string;
@@ -307,6 +308,69 @@ export class VmUserManager {
         },
       };
     });
+  }
+
+  async runOnConnectHook(
+    username: string,
+    options?: { homeDirOverride?: string; envOverrides?: Record<string, string> }
+  ): Promise<void> {
+    assertSafeUsername(username);
+    if (!this.config.onConnectScript) {
+      return;
+    }
+
+    if (this.config.vmUserMode === "mock" && !options?.homeDirOverride) {
+      return;
+    }
+
+    let homeDir = options?.homeDirOverride;
+    if (!homeDir) {
+      const sys = await this.lookupSystemUser(username);
+      if (sys.exists && sys.uid !== undefined && sys.uid < 1000) {
+        throw new Error(`Account '${username}' conflicts with a system UID (${sys.uid})`);
+      }
+      homeDir = sys.homeDir;
+    }
+
+    let scriptPath = this.config.onConnectScript;
+    if (!(await Bun.file(scriptPath).exists())) {
+      await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
+      const fallbackPath = path.join(this.config.dataDir, "on-connect.default.sh");
+      const embeddedText = await Bun.file(EMBEDDED_ON_CONNECT_SCRIPT).text();
+      await fs.writeFile(fallbackPath, embeddedText, { mode: 0o755 });
+      scriptPath = fallbackPath;
+    }
+
+    const useSudo = this.config.useSudo && !options?.homeDirOverride;
+    const argv = [...(useSudo ? ["sudo", "-n"] : []), "/bin/bash", scriptPath, username, homeDir];
+
+    const proc = Bun.spawn(argv, {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: options?.envOverrides ? { ...process.env, ...options.envOverrides } : process.env,
+    });
+
+    const [exitCode, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+
+    const nowIso = new Date().toISOString();
+    for (const line of stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
+      console.log(`${nowIso} ${line}`);
+    }
+
+    if (exitCode !== 0) {
+      const detail = stderr.trim() || `exit code ${exitCode}`;
+      console.warn(
+        `${nowIso} [on-connect] Enforcement script '${scriptPath}' exited with error for '${username}': ${detail}`
+      );
+      if (options?.homeDirOverride) {
+        throw new Error(`on-connect script failed: ${detail}`);
+      }
+    }
   }
 
   private async execCommand(

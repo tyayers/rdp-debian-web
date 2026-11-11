@@ -12,6 +12,7 @@ import {
   type SessionUser,
 } from "./auth.ts";
 import { VmUserManager } from "./vm-users.ts";
+import { EMBEDDED_PUBLIC_FILES } from "./embedded-assets.ts";
 import {
   cleanupSockets,
   createRdpWsContext,
@@ -165,6 +166,16 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
             `${new Date().toISOString()} [rdp] Blocked WebSocket upgrade for '${session.username}': local VM user not provisioned (existsOnSystem=${status.existsOnSystem}, mode=${config.vmUserMode})`
           );
           return jsonResponse({ error: "Local VM account must be initialized first" }, 403);
+        }
+
+        // Enforce desktop session configuration (e.g. LXQt panel favorites) before opening xrdp
+        try {
+          await vmUsers.runOnConnectHook(session.username);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `${new Date().toISOString()} [on-connect] Unexpected error running hook for '${session.username}': ${msg}`
+          );
         }
 
         const wsCtx = createRdpWsContext(session, config);
@@ -328,8 +339,11 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
       if (req.method === "GET" || req.method === "HEAD") {
         if (pathname === "/" || pathname === "/desktop") {
           const nonce = crypto.randomBytes(16).toString("base64");
-          const indexPath = path.join(config.publicDir, "index.html");
-          const htmlTemplate = await Bun.file(indexPath).text();
+          const diskIndex = Bun.file(path.join(config.publicDir, "index.html"));
+          const indexFile = (await diskIndex.exists())
+            ? diskIndex
+            : Bun.file(EMBEDDED_PUBLIC_FILES["/index.html"]!.filePath);
+          const htmlTemplate = await indexFile.text();
           const html = htmlTemplate.replaceAll("{{CSP_NONCE}}", nonce);
           const headers = new Headers({
             "Content-Type": "text/html; charset=utf-8",
@@ -339,7 +353,7 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
           return new Response(req.method === "HEAD" ? null : html, { status: 200, headers });
         }
 
-        // Safe static asset resolution inside publicDir
+        // Safe static asset resolution inside publicDir (with embedded binary fallback)
         const safeRel = path.posix.normalize(pathname).replace(/^\/+/, "");
         const resolved = path.resolve(config.publicDir, safeRel);
         if (
@@ -356,6 +370,17 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
             applySecurityHeaders(headers);
             return new Response(req.method === "HEAD" ? null : file, { status: 200, headers });
           }
+        }
+
+        const embedded = EMBEDDED_PUBLIC_FILES[`/${safeRel}`];
+        if (embedded) {
+          const file = Bun.file(embedded.filePath);
+          const headers = new Headers({
+            "Content-Type": embedded.contentType,
+            "Cache-Control": safeRel.endsWith(".wasm") ? "public, max-age=3600" : "no-cache",
+          });
+          applySecurityHeaders(headers);
+          return new Response(req.method === "HEAD" ? null : file, { status: 200, headers });
         }
       }
 

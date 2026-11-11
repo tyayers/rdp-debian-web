@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Apigee AI Demos portal with Google (@google.com) auth, VM user provisioning, and browser-based IronRDP WASM access to xrdp",
   "scripts": {
+    "build": "bun build --compile src/server.ts --outfile apigee-ai-demos",
     "start": "bun run src/server.ts",
     "dev": "bun --watch run src/server.ts",
     "test": "bun test",

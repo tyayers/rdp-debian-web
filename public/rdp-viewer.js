@@ -169,18 +169,22 @@ export class RdpViewer {
 
     this.resizeObserver = new ResizeObserver(() => {
       if (!this.connected) return;
-      clearTimeout(this.resizeTimer);
-      this.resizeTimer = setTimeout(() => {
-        this.requestViewportResize();
-      }, 300);
+      this.scheduleViewportResize();
     });
     this.resizeObserver.observe(this.viewport);
   }
 
+  scheduleViewportResize(delayMs = 350) {
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = setTimeout(() => {
+      this.requestViewportResize();
+    }, delayMs);
+  }
+
   computeTargetDimensions() {
     const rect = this.viewport.getBoundingClientRect();
-    const rawW = Math.max(800, Math.floor(rect.width || 1280));
-    const rawH = Math.max(600, Math.floor(rect.height || 800));
+    const rawW = Math.max(320, Math.floor(rect.width || 1280));
+    const rawH = Math.max(240, Math.floor(rect.height || 800));
     const width = Math.min(4096, rawW & ~1);
     const height = Math.min(4096, rawH);
     return { width, height };
@@ -240,11 +244,15 @@ export class RdpViewer {
         this.connectedAt = Date.now();
         this.onStatus("connected", `${w}×${h}`);
         this.canvas.focus();
+        // Sync if viewport changed while RDP handshake was in progress
+        this.scheduleViewportResize(400);
       },
       // on_resize(w, h)
       (w, h) => {
-        this.canvas.width = w;
-        this.canvas.height = h;
+        if (this.canvas.width !== w || this.canvas.height !== h) {
+          this.canvas.width = w;
+          this.canvas.height = h;
+        }
         this.onStatus("connected", `${w}×${h}`);
       },
       // on_draw_rect(rgbaUint8Array, x, y, w, h)
@@ -487,6 +495,7 @@ export class RdpViewer {
   requestViewportResize() {
     if (!this.connected || !this.session) return;
     const { width, height } = this.computeTargetDimensions();
+    if (width === this.canvas.width && height === this.canvas.height) return;
     this.session.resize(width, height);
   }
 
