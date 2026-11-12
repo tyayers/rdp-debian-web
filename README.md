@@ -1,12 +1,21 @@
 # Apigee AI Demos
 
-Browser-based `xrdp` workstation portal with `@google.com` login, built on **Bun** and **IronRDP (WebAssembly)**.
+Browser-based `xrdp` workstation portal authenticated via **Google Cloud IAP** (or `?user=test@example.com` for direct testing), built on **Bun** and **IronRDP (WebAssembly)**.
 
-## Getting Started (Debian VM)
+## How User Provisioning Works
 
-### 1. Prepare `xrdp` on the VM
+1. **Identity Resolution**:
+   - **Behind GCP IAP**: Reads the authenticated user email from the `X-Goog-Authenticated-User-Email` header (e.g. `accounts.google.com:alice@google.com` -> Linux user `alice`).
+   - **Direct / Non-IAP Testing**: Pass `?user=test@example.com` in the URL (`http://localhost:8080/?user=test@example.com` -> Linux user `test`).
+2. **Automatic Linux User & Password Management (`./users.yaml`)**:
+   - Checks `/etc/passwd` on the VM; if the Linux user does not exist yet, creates it automatically (`useradd -m -s /bin/bash`).
+   - Generates a random password for the user, stores all usernames and generated passwords in **`./users.yaml`** (in the directory where the service is started, `chmod 600`), syncs the Linux password via `chpasswd`, and **automatically connects** the browser RDP session without any password prompt.
 
-Make sure `xrdp` can read its TLS key and has a desktop session to launch for newly created users:
+## Getting Started (Debian 13 VM)
+
+### 1. Prepare `xrdp` on the GCP VM
+
+Make sure `xrdp` can read its TLS key and **GCP OS Login is disabled** on the instance (OS Login intercepts NSS lookups without `/etc/passwd` entries, which blocks local `xrdp` PAM logins):
 
 ```bash
 # Allow xrdp to read /etc/xrdp/key.pem for TLS
@@ -14,38 +23,21 @@ sudo adduser xrdp ssl-cert
 sudo systemctl restart xrdp xrdp-sesman
 ```
 
-### 2. Configure `.env`
+*(If GCP OS Login is enabled on the VM, set metadata `enable-oslogin=FALSE` on the instance.)*
+
+### 2. Optional `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
-
 ```env
 HOST=127.0.0.1
 PORT=8080
-PUBLIC_BASE_URL=https://your-domain.com
 SESSION_SECRET=replace-with-openssl-rand-hex-32
-
-GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-client-secret
-
-VM_USER_MODE=system
 ```
 
-*(In Google Cloud Console, add `https://your-domain.com/api/auth/google/callback` as an Authorized Redirect URI. For `useradd` / `chpasswd` to create users and reset passwords, either run `sudo bun run start` or ensure your VM user has passwordless `sudo`—see `deploy/sudoers.example`.)*
-
-### 3. Configure Caddy
-
-```caddyfile
-your-domain.com {
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:8080
-}
-```
-
-### 4. Start the Server
+### 3. Start the Server
 
 **Option A — Compile a standalone binary and run with `sudo` (Recommended):**
 
@@ -54,36 +46,21 @@ bun run build
 sudo ./apigee-ai-demos
 ```
 
-*(All HTML, CSS, JS, WASM assets, and the default `scripts/on-connect.sh` hook are embedded into `./apigee-ai-demos`, and it automatically loads `.env` from the current directory—so `sudo` does not need `bun` in `root`'s `PATH`. If `./scripts/on-connect.sh` is present on disk, edits to it take effect immediately on the next RDP connect without recompiling.)*
+*(All HTML, CSS, JS, WASM, `wallpaper.jpg`, and `scripts/on-connect.sh` assets are embedded into `./apigee-ai-demos`. Generated user credentials are saved to `./users.yaml` in the current working directory.)*
 
 **Option B — Run directly with Bun:**
 
 ```bash
-# As a user with passwordless sudo:
-bun run start
-
-# Or as root:
 sudo "$(which bun)" run start
 ```
 
-*(For local UI testing without Google OAuth or real Linux users: `ALLOW_DEV_AUTH=true VM_USER_MODE=mock bun run dev`)*
+Then access via your GCP IAP domain, or directly with `?user=test@example.com`:
+`https://your-domain.com/?user=test@example.com`
 
 ## VM Tool Bootstrap & Per-Connect Desktop Enforcement (`scripts/on-connect.sh`)
 
-- **Installed once system-wide for everyone (`--system-only`)**: On startup (when run via `sudo ./apigee-ai-demos`), the server ensures **Plank**, **QTerminal**, **PCManFM-Qt** (file manager), **FeatherPad** (text editor), **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed once at the OS level for all users.
+- **Installed once system-wide for everyone (`--system-only`)**: On startup, the server ensures **Plank**, **QTerminal**, **PCManFM-Qt**, **FeatherPad**, **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed once at the OS level.
 - **Applied per user on connect (`./scripts/on-connect.sh <username> <homedir>`)**:
-  1. Enforces the top **LXQt** panel layout (`~/.config/lxqt/panel.conf`, including explicit `menu_file=/etc/xdg/menus/lxqt-applications.menu` for the application launcher and a right-aligned **Sign Out** button), guarantees `lxqt-panel` and `plank` are running, and marks `~/Desktop/*.desktop` shortcuts trusted (`QuickExec=true` + GVFS `metadata::trusted=true`) so they execute immediately without prompts.
-  2. Copies `public/wallpaper.jpg` into `~/.local/share/backgrounds/wallpaper.jpg` and sets it as the LXQt desktop background with `WallpaperMode=zoom` (`~/.config/pcmanfm-qt/lxqt/settings.conf`).
-  3. Places shortcuts on `~/Desktop` (**Terminal**, **Google Chrome**, **VSCodium**, **Antigravity**) and pins exact launchers on the **Plank** dock (**Home**, **Google Chrome**, **VSCodium**, **Terminal**, **Text Editor**, **Antigravity**).
-
-## Troubleshooting Black Screen / Immediate Disconnect
-
-Check the Bun console output and `sudo tail -f /var/log/xrdp.log /var/log/xrdp-sesman.log`:
-
-1. **`VM_USER_MODE=mock` left enabled on the VM**: Mock mode does not create real Linux users or set Linux passwords, so `xrdp-sesman` immediately closes the session after the RDP handshake. Use `VM_USER_MODE=system`.
-2. **Desktop session exits immediately (`/etc/xrdp/startwm.sh`)**: On Debian, unset conflicting D-Bus variables before `Xsession` runs in `/etc/xrdp/startwm.sh`:
-   ```sh
-   unset DBUS_SESSION_BUS_ADDRESS
-   unset XDG_RUNTIME_DIR
-   ```
-   Also ensure a desktop environment (e.g. `xfce4`) is installed and the same Linux user is not already logged into a local graphical session on the VM.
+  1. Enforces the top **LXQt** panel layout (`~/.config/lxqt/panel.conf`, including explicit `menu_file=/etc/xdg/menus/lxqt-applications.menu` and a right-aligned **Sign Out** button), guarantees `lxqt-panel` and `plank` are running, and marks `~/Desktop/*.desktop` shortcuts trusted.
+  2. Copies `public/wallpaper.jpg` into `~/.local/share/backgrounds/wallpaper.jpg` with `WallpaperMode=zoom`.
+  3. Places shortcuts on `~/Desktop` (**Terminal**, **Google Chrome**, **VSCodium**, **Antigravity**) and pins launchers on the **Plank** dock (**Home**, **Google Chrome**, **VSCodium**, **Terminal**, **Text Editor**, **Antigravity**).

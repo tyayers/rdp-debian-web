@@ -5,43 +5,170 @@ import type { AppConfig } from "./config.ts";
 import { POSIX_USERNAME_RE, RESERVED_USERNAMES } from "./auth.ts";
 import { EMBEDDED_ON_CONNECT_SCRIPT, EMBEDDED_WALLPAPER_JPG } from "./embedded-assets.ts";
 
-export interface VmUserStatus {
-  username: string;
-  existsOnSystem: boolean;
-  provisioned: boolean;
-  homeDir: string;
-  createdAt: string | null;
-  passwordUpdatedAt: string | null;
+export interface StoredUserEntry {
+  email: string;
+  password: string;
+  createdAt: string;
 }
 
-interface ProvisionedRecord {
+export type UsersYamlMap = Record<string, StoredUserEntry>;
+
+export interface ProvisionedVmUser {
+  username: string;
   email: string;
   homeDir: string;
-  createdAt: string;
-  passwordUpdatedAt: string;
-  mockPasswordHash?: string;
+  password: string;
+  created: boolean;
 }
 
-type RegistryMap = Record<string, ProvisionedRecord>;
-
-interface SystemUserLookup {
+interface LocalPasswdLookup {
   exists: boolean;
-  inEtcPasswd: boolean;
   uid?: number;
+  gid?: number;
   homeDir: string;
 }
 
-export function validateVmPassword(password: string): string | null {
-  if (typeof password !== "string" || password.length < 8) {
-    return "Password must be at least 8 characters long.";
+/**
+ * Optional injectable system adapter used strictly by automated tests on non-root machines.
+ * Production always uses real `/etc/passwd`, `/usr/sbin/useradd`, and `/usr/sbin/chpasswd`.
+ */
+export interface SystemUserAdapter {
+  passwdPath?: string;
+  execCommand?: (argv: string[], stdinText?: string) => Promise<{ exitCode: number; stderr: string }>;
+  skipSystemOnConnect?: boolean;
+}
+
+const PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+
+export function generateRandomPassword(length = 24): string {
+  const bytes = crypto.randomBytes(length);
+  let out = "";
+  for (let i = 0; i < length; i++) {
+    out += PASSWORD_ALPHABET[bytes[i]! % PASSWORD_ALPHABET.length];
   }
-  if (password.length > 128) {
-    return "Password must not exceed 128 characters.";
+  return out;
+}
+
+function unquoteYamlScalar(val: string): string {
+  const trimmed = val.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
   }
-  if (/[\r\n\0]/.test(password)) {
-    return "Password contains disallowed control characters.";
+  return trimmed;
+}
+
+function quoteYamlIfNeeded(val: string): string {
+  if (/^[A-Za-z0-9._@/-]+$/.test(val)) {
+    return val;
   }
-  return null;
+  return JSON.stringify(val);
+}
+
+export function parseUsersYaml(raw: string): UsersYamlMap {
+  const map: UsersYamlMap = {};
+  let currentUser: string | null = null;
+  let inUsersRoot = false;
+
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const commentIdx = rawLine.indexOf(" #");
+    const line = (commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine).replace(/\s+$/, "");
+    if (!line.trim() || line.trim().startsWith("#")) {
+      continue;
+    }
+
+    const indent = line.length - line.trimStart().length;
+    const trimmed = line.trim();
+
+    if (indent === 0) {
+      if (trimmed === "users:") {
+        inUsersRoot = true;
+        currentUser = null;
+        continue;
+      }
+      inUsersRoot = false;
+      const colon = trimmed.indexOf(":");
+      if (colon > 0) {
+        const key = trimmed.slice(0, colon).trim();
+        const rest = trimmed.slice(colon + 1).trim();
+        if (rest) {
+          map[key] = {
+            email: key,
+            password: unquoteYamlScalar(rest),
+            createdAt: new Date(0).toISOString(),
+          };
+          currentUser = null;
+        } else {
+          currentUser = key;
+          map[key] ??= { email: key, password: "", createdAt: new Date().toISOString() };
+        }
+      }
+      continue;
+    }
+
+    if (inUsersRoot && indent === 2) {
+      const colon = trimmed.indexOf(":");
+      if (colon > 0) {
+        const key = trimmed.slice(0, colon).trim();
+        const rest = trimmed.slice(colon + 1).trim();
+        if (rest) {
+          map[key] = {
+            email: key,
+            password: unquoteYamlScalar(rest),
+            createdAt: new Date().toISOString(),
+          };
+          currentUser = null;
+        } else {
+          currentUser = key;
+          map[key] ??= { email: key, password: "", createdAt: new Date().toISOString() };
+        }
+      }
+      continue;
+    }
+
+    if (currentUser && indent >= 2) {
+      const colon = trimmed.indexOf(":");
+      if (colon > 0) {
+        const field = trimmed.slice(0, colon).trim();
+        const value = unquoteYamlScalar(trimmed.slice(colon + 1));
+        const entry = map[currentUser]!;
+        if (field === "email") entry.email = value;
+        else if (field === "password") entry.password = value;
+        else if (field === "created_at" || field === "createdAt") entry.createdAt = value;
+      }
+    }
+  }
+
+  // Remove any incomplete entries lacking a password
+  for (const [k, v] of Object.entries(map)) {
+    if (!v.password) {
+      delete map[k];
+    }
+  }
+  return map;
+}
+
+export function serializeUsersYaml(users: UsersYamlMap): string {
+  const keys = Object.keys(users).sort();
+  if (keys.length === 0) {
+    return "# Auto-generated Linux VM users and passwords for xrdp sessions\nusers: {}\n";
+  }
+
+  const lines = [
+    "# Auto-generated Linux VM users and passwords for xrdp sessions",
+    "users:",
+  ];
+  for (const username of keys) {
+    const entry = users[username]!;
+    lines.push(`  ${username}:`);
+    lines.push(`    email: ${quoteYamlIfNeeded(entry.email)}`);
+    lines.push(`    password: ${quoteYamlIfNeeded(entry.password)}`);
+    lines.push(`    created_at: ${quoteYamlIfNeeded(entry.createdAt)}`);
+  }
+  lines.push("");
+  return lines.join("\n");
 }
 
 function assertSafeUsername(username: string): void {
@@ -54,29 +181,31 @@ function assertSafeUsername(username: string): void {
 }
 
 export class VmUserManager {
-  private readonly registryPath: string;
   private writeLock: Promise<void> = Promise.resolve();
+  private readonly syncedThisBoot = new Set<string>();
+  private readonly passwdPath: string;
 
-  constructor(private readonly config: AppConfig) {
-    const filename =
-      config.vmUserMode === "mock" ? "mock-vm-users.json" : "provisioned-vm-users.json";
-    this.registryPath = path.join(config.dataDir, filename);
+  constructor(
+    private readonly config: AppConfig,
+    private readonly adapter?: SystemUserAdapter
+  ) {
+    this.passwdPath = adapter?.passwdPath ?? "/etc/passwd";
   }
 
-  private async readRegistry(): Promise<RegistryMap> {
+  private async readUsersYaml(): Promise<UsersYamlMap> {
     try {
-      const raw = await fs.readFile(this.registryPath, "utf8");
-      return JSON.parse(raw) as RegistryMap;
+      const raw = await fs.readFile(this.config.usersFile, "utf8");
+      return parseUsersYaml(raw);
     } catch {
       return {};
     }
   }
 
-  private async writeRegistry(data: RegistryMap): Promise<void> {
-    await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
-    const tmpPath = `${this.registryPath}.tmp.${process.pid}`;
-    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
-    await fs.rename(tmpPath, this.registryPath);
+  private async writeUsersYaml(users: UsersYamlMap): Promise<void> {
+    await fs.mkdir(path.dirname(this.config.usersFile), { recursive: true });
+    const tmpPath = `${this.config.usersFile}.tmp.${process.pid}.${Date.now()}`;
+    await fs.writeFile(tmpPath, serializeUsersYaml(users), { mode: 0o600 });
+    await fs.rename(tmpPath, this.config.usersFile);
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -93,157 +222,74 @@ export class VmUserManager {
     }
   }
 
-  private parsePasswdLine(line: string, username: string): { uid?: number; homeDir: string } {
-    const fields = line.trim().split(":");
-    const uid = Number.parseInt(fields[2] ?? "", 10);
-    const homeDir = fields[5] || `/home/${username}`;
-    return {
-      uid: Number.isNaN(uid) ? undefined : uid,
-      homeDir,
-    };
-  }
-
-  private async lookupSystemUser(username: string): Promise<SystemUserLookup> {
+  private async lookupLocalPasswdUser(username: string): Promise<LocalPasswdLookup> {
     assertSafeUsername(username);
     const prefix = `${username}:`;
 
-    // 1. Check local /etc/passwd first
     try {
-      const passwd = await fs.readFile("/etc/passwd", "utf8");
+      const passwd = await fs.readFile(this.passwdPath, "utf8");
       for (const line of passwd.split("\n")) {
         if (line.startsWith(prefix)) {
-          const parsed = this.parsePasswdLine(line, username);
+          const fields = line.trim().split(":");
+          const uid = Number.parseInt(fields[2] ?? "", 10);
+          const gid = Number.parseInt(fields[3] ?? "", 10);
+          const homeDir = fields[5] || `/home/${username}`;
           return {
             exists: true,
-            inEtcPasswd: true,
-            uid: parsed.uid,
-            homeDir: parsed.homeDir,
+            uid: Number.isNaN(uid) ? undefined : uid,
+            gid: Number.isNaN(gid) ? undefined : gid,
+            homeDir,
           };
         }
       }
     } catch {
-      // Continue to getent fallback
-    }
-
-    // 2. Check NSS (e.g. getent passwd <username> for LDAP / OS Login / SSSD accounts)
-    try {
-      const proc = Bun.spawn(["getent", "passwd", "--", username], {
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "ignore",
-      });
-      const [code, stdout] = await Promise.all([
-        proc.exited,
-        new Response(proc.stdout).text(),
-      ]);
-      if (code === 0 && stdout.startsWith(prefix)) {
-        const parsed = this.parsePasswdLine(stdout.split("\n")[0]!, username);
-        return {
-          exists: true,
-          inEtcPasswd: false,
-          uid: parsed.uid,
-          homeDir: parsed.homeDir,
-        };
-      }
-    } catch {
-      // getent unavailable
+      // Fall through if passwd file does not exist yet (e.g. test path)
     }
 
     return {
       exists: false,
-      inEtcPasswd: false,
       homeDir: `/home/${username}`,
     };
   }
 
-  async getStatus(username: string): Promise<VmUserStatus> {
+  /**
+   * Ensures the Linux user exists in `/etc/passwd` (creating via `useradd -m` if missing),
+   * generates or loads their password from `users.yaml` in the service start directory,
+   * and syncs their local Linux password via `chpasswd` for `xrdp` PAM login.
+   */
+  async ensureProvisionedUser(username: string, email: string): Promise<ProvisionedVmUser> {
     assertSafeUsername(username);
-    const registry = await this.readRegistry();
-    const record = registry[username];
-
-    if (this.config.vmUserMode === "mock") {
-      return {
-        username,
-        existsOnSystem: Boolean(record),
-        provisioned: Boolean(record),
-        homeDir: record?.homeDir ?? `/home/${username}`,
-        createdAt: record?.createdAt ?? null,
-        passwordUpdatedAt: record?.passwordUpdatedAt ?? null,
-      };
-    }
-
-    const sys = await this.lookupSystemUser(username);
-    // Prevent modifying pre-existing low-UID system accounts (< 1000)
-    if (sys.exists && sys.uid !== undefined && sys.uid < 1000) {
-      throw new Error(`Account '${username}' conflicts with a system UID (${sys.uid})`);
-    }
-
-    // If the Linux user already exists on the VM, use it directly without forcing creation
-    return {
-      username,
-      existsOnSystem: sys.exists,
-      provisioned: sys.exists,
-      homeDir: sys.homeDir,
-      createdAt: record?.createdAt ?? null,
-      passwordUpdatedAt: record?.passwordUpdatedAt ?? null,
-    };
-  }
-
-  async setupOrUpdatePassword(
-    username: string,
-    email: string,
-    password: string
-  ): Promise<{ created: boolean; status: VmUserStatus }> {
-    assertSafeUsername(username);
-    const pwErr = validateVmPassword(password);
-    if (pwErr) {
-      throw new Error(pwErr);
-    }
 
     return this.withLock(async () => {
       const nowIso = new Date().toISOString();
-      const registry = await this.readRegistry();
-      const existingRecord = registry[username];
+      const users = await this.readUsersYaml();
+      let record = users[username];
+      let usersYamlChanged = false;
 
-      if (this.config.vmUserMode === "mock") {
-        const salt = crypto.randomBytes(16).toString("hex");
-        const hash = crypto.scryptSync(password, salt, 32).toString("hex");
-        const created = !existingRecord;
-        registry[username] = {
+      if (!record || !record.password) {
+        record = {
           email,
-          homeDir: `/home/${username}`,
-          createdAt: existingRecord?.createdAt ?? nowIso,
-          passwordUpdatedAt: nowIso,
-          mockPasswordHash: `${salt}:${hash}`,
+          password: generateRandomPassword(24),
+          createdAt: nowIso,
         };
-        await this.writeRegistry(registry);
-        console.log(
-          `${nowIso} [vm-users] MOCK mode: ${created ? "created" : "updated password for"} mock user '${username}' (${email}) — note: Linux /etc/passwd was NOT modified`
-        );
-        return {
-          created,
-          status: {
-            username,
-            existsOnSystem: true,
-            provisioned: true,
-            homeDir: `/home/${username}`,
-            createdAt: registry[username]!.createdAt,
-            passwordUpdatedAt: nowIso,
-          },
-        };
-      }
-
-      const sysBefore = await this.lookupSystemUser(username);
-      if (sysBefore.exists && sysBefore.uid !== undefined && sysBefore.uid < 1000) {
-        throw new Error(`Account '${username}' conflicts with a system UID (${sysBefore.uid})`);
+        users[username] = record;
+        usersYamlChanged = true;
+      } else if (email && record.email !== email) {
+        record.email = email;
+        usersYamlChanged = true;
       }
 
       const cmdPrefix = this.config.useSudo ? ["sudo", "-n"] : [];
-      let created = false;
+      let sysUser = await this.lookupLocalPasswdUser(username);
 
-      if (!sysBefore.exists) {
+      if (sysUser.exists && sysUser.uid !== undefined && sysUser.uid < 1000) {
+        throw new Error(`Account '${username}' conflicts with a system UID (${sysUser.uid})`);
+      }
+
+      let created = false;
+      if (!sysUser.exists) {
         console.log(
-          `${nowIso} [vm-users] User '${username}' not found on system; creating via ${this.config.useSudo ? "sudo useradd" : "useradd"}`
+          `${nowIso} [vm-users] User '${username}' not found in ${this.passwdPath}; creating Linux account...`
         );
         const useraddArgs = [
           ...cmdPrefix,
@@ -257,55 +303,71 @@ export class VmUserManager {
         }
         useraddArgs.push("--", username);
 
-        await this.execCommand(useraddArgs, undefined, "Failed to create local VM user");
+        await this.execSystemCommand(
+          useraddArgs,
+          undefined,
+          `Failed to create Linux user '${username}'`
+        );
         created = true;
-      } else {
+
+        sysUser = await this.lookupLocalPasswdUser(username);
+        if (!sysUser.exists) {
+          throw new Error(
+            `useradd completed for '${username}', but account was still not found in ${this.passwdPath}`
+          );
+        }
+      }
+
+      // Ensure home directory exists on disk even for pre-existing accounts created without -m
+      if (!this.adapter) {
+        try {
+          await fs.mkdir(sysUser.homeDir, { recursive: true, mode: 0o755 });
+          if (
+            typeof process.getuid === "function" &&
+            process.getuid() === 0 &&
+            sysUser.uid !== undefined &&
+            sysUser.gid !== undefined
+          ) {
+            await fs.chown(sysUser.homeDir, sysUser.uid, sysUser.gid);
+          }
+        } catch {
+          // Best-effort; on-connect.sh also creates and chowns homeDir
+        }
+      }
+
+      const syncKey = `${username}:${record.password}`;
+      if (created || usersYamlChanged || !this.syncedThisBoot.has(syncKey)) {
+        await this.execSystemCommand(
+          [...cmdPrefix, "/usr/sbin/chpasswd"],
+          `${username}:${record.password}\n`,
+          `Failed to set Linux password for '${username}'`
+        );
+        this.syncedThisBoot.add(syncKey);
         console.log(
-          `${nowIso} [vm-users] User '${username}' already exists on system (uid=${sysBefore.uid ?? "?"}, inEtcPasswd=${sysBefore.inEtcPasswd}); skipping useradd and updating password`
+          `${nowIso} [vm-users] ${
+            created ? "Created Linux user and set password" : "Synced Linux password"
+          } for '${username}' (uid=${sysUser.uid ?? "?"}, home=${sysUser.homeDir}, store=${this.config.usersFile})`
         );
       }
 
-      // Set or reset user password via chpasswd stdin (never expose password in process argv)
-      await this.execCommand(
-        [...cmdPrefix, "/usr/sbin/chpasswd"],
-        `${username}:${password}\n`,
-        sysBefore.exists && !sysBefore.inEtcPasswd
-          ? `Failed to set local password (account '${username}' is managed outside /etc/passwd, e.g. OS Login/LDAP)`
-          : "Failed to set local VM password"
-      );
+      if (usersYamlChanged) {
+        await this.writeUsersYaml(users);
+      }
 
-      const sysAfter = await this.lookupSystemUser(username);
-
-      // Optional hook for future home-directory customization
       if (created && this.config.setupUserScript) {
-        await this.execCommand(
-          [...cmdPrefix, this.config.setupUserScript, username, sysAfter.homeDir],
+        await this.execSystemCommand(
+          [...cmdPrefix, this.config.setupUserScript, username, sysUser.homeDir],
           undefined,
           "User created, but home-directory setup script failed"
         );
       }
 
-      registry[username] = {
-        email,
-        homeDir: sysAfter.homeDir,
-        createdAt: existingRecord?.createdAt ?? nowIso,
-        passwordUpdatedAt: nowIso,
-      };
-      await this.writeRegistry(registry);
-      console.log(
-        `${nowIso} [vm-users] SYSTEM mode: ${created ? "created Linux user and set password for" : "reset/updated Linux password for"} '${username}' (uid=${sysAfter.uid ?? "?"}, home=${sysAfter.homeDir})`
-      );
-
       return {
+        username,
+        email: record.email,
+        homeDir: sysUser.homeDir,
+        password: record.password,
         created,
-        status: {
-          username,
-          existsOnSystem: true,
-          provisioned: true,
-          homeDir: sysAfter.homeDir,
-          createdAt: registry[username]!.createdAt,
-          passwordUpdatedAt: nowIso,
-        },
       };
     });
   }
@@ -333,11 +395,10 @@ export class VmUserManager {
   }
 
   /**
-   * Installs/updates shared system-wide desktop tools (Plank, QTerminal, PCManFM-Qt, FeatherPad,
-   * VSCodium, Google Chrome, Antigravity CLI & IDE) once on server startup for all VM users.
+   * Installs/updates shared system-wide desktop tools once on server startup for all VM users.
    */
   async ensureSystemTools(): Promise<void> {
-    if (!this.config.onConnectScript || this.config.vmUserMode === "mock") {
+    if (!this.config.onConnectScript || this.adapter?.skipSystemOnConnect) {
       return;
     }
 
@@ -401,14 +462,13 @@ export class VmUserManager {
     if (!this.config.onConnectScript) {
       return;
     }
-
-    if (this.config.vmUserMode === "mock" && !options?.homeDirOverride) {
+    if (this.adapter?.skipSystemOnConnect && !options?.homeDirOverride) {
       return;
     }
 
     let homeDir = options?.homeDirOverride;
     if (!homeDir) {
-      const sys = await this.lookupSystemUser(username);
+      const sys = await this.lookupLocalPasswdUser(username);
       if (sys.exists && sys.uid !== undefined && sys.uid < 1000) {
         throw new Error(`Account '${username}' conflicts with a system UID (${sys.uid})`);
       }
@@ -431,7 +491,6 @@ export class VmUserManager {
       },
     });
 
-    // Stream stdout line-by-line so first-time package installs emit live progress to the UI
     const streamStdout = async () => {
       if (!proc.stdout) return;
       const reader = proc.stdout.getReader();
@@ -478,35 +537,49 @@ export class VmUserManager {
     }
   }
 
-  private async execCommand(
+  private async execSystemCommand(
     argv: string[],
     stdinText: string | undefined,
     errorContext: string
   ): Promise<void> {
-    const proc = Bun.spawn(argv, {
-      stdin: stdinText !== undefined ? "pipe" : "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    let exitCode: number;
+    let stderr: string;
 
-    if (stdinText !== undefined && proc.stdin) {
-      proc.stdin.write(stdinText);
-      proc.stdin.end();
+    if (this.adapter?.execCommand) {
+      const res = await this.adapter.execCommand(argv, stdinText);
+      exitCode = res.exitCode;
+      stderr = res.stderr;
+    } else {
+      const proc = Bun.spawn(argv, {
+        stdin: stdinText !== undefined ? "pipe" : "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      if (stdinText !== undefined && proc.stdin) {
+        proc.stdin.write(stdinText);
+        proc.stdin.end();
+      }
+
+      [exitCode, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stderr).text(),
+      ]);
     }
-
-    const [exitCode, stderr] = await Promise.all([
-      proc.exited,
-      new Response(proc.stderr).text(),
-    ]);
 
     if (exitCode !== 0) {
       const detail = stderr.trim() || `exit code ${exitCode}`;
+      if (/already exists/i.test(detail)) {
+        throw new Error(
+          `${errorContext}: ${detail} (Account '${argv.at(-1)}' is not in /etc/passwd, which indicates GCP OS Login is intercepting NSS lookups. Disable OS Login on this VM via: gcloud compute instances add-metadata <vm-name> --metadata=enable-oslogin=FALSE)`
+        );
+      }
       const needsPrivilegeHint =
         /permission denied|cannot lock \/etc\/passwd|a password is required|must be root|authentication failure/i.test(
           detail
         );
       const hint = needsPrivilegeHint
-        ? " (Run the server with root privileges, e.g. 'sudo bun run start', or allow passwordless sudo for /usr/sbin/useradd and /usr/sbin/chpasswd in /etc/sudoers.d/)"
+        ? " (Run the server with root privileges, e.g. 'sudo ./apigee-ai-demos')"
         : "";
       throw new Error(`${errorContext}: ${detail}${hint}`);
     }

@@ -300,7 +300,7 @@ export class RdpViewer {
         if (shortLived) {
           this.onStatus(
             "error",
-            `xrdp closed the session (${reason || "disconnected"}). Verify your VM password and desktop session (/etc/xrdp/startwm.sh).`
+            `xrdp closed the session (${reason || "disconnected"}). Check /var/log/xrdp-sesman.log and /etc/xrdp/startwm.sh on the VM.`
           );
         } else {
           this.onStatus("disconnected", reason || "Session ended");
@@ -314,7 +314,9 @@ export class RdpViewer {
     );
 
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${proto}//${window.location.host}/api/rdp/ws`;
+    const userParam = new URLSearchParams(window.location.search).get("user")?.trim();
+    const wsQuery = userParam ? `?user=${encodeURIComponent(userParam)}` : "";
+    const wsUrl = `${proto}//${window.location.host}/api/rdp/ws${wsQuery}`;
     this.onStatus("connecting", "Connecting to VM xrdp session…");
 
     const ws = new WebSocket(wsUrl);
@@ -383,7 +385,7 @@ export class RdpViewer {
         if (!wasConnected || elapsed < 8000 || this.framesDrawn === 0) {
           this.onStatus(
             "error",
-            `xrdp closed the connection (${ev.reason || `code ${ev.code}`}). Check your VM password, VM_USER_MODE=system, and Bun server logs.`
+            `xrdp closed the connection (${ev.reason || `code ${ev.code}`}). Check server console logs and /var/log/xrdp-sesman.log.`
           );
         } else {
           this.onStatus("disconnected", "Desktop connection closed");

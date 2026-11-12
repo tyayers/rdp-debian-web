@@ -1,56 +1,36 @@
 import { RdpViewer } from "./rdp-viewer.js";
 
-const AUTH_ERROR_MESSAGES = {
-  domain_not_allowed: "Access denied: only @google.com Google accounts are permitted.",
-  oauth_not_configured:
-    "Google OAuth credentials (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET) are not configured on the server.",
-  access_denied: "Google sign-in was cancelled.",
-  expired_state: "Sign-in session expired. Please try again.",
-  state_mismatch: "Sign-in state verification failed. Please try again.",
-  token_exchange_failed: "Could not verify Google authorization code.",
-  unverified_email: "Your Google account email address is not verified.",
-  invalid_username: "Could not map your Google email to a valid Linux VM username.",
-};
+const urlParams = new URLSearchParams(window.location.search);
+const queryUserParam = urlParams.get("user")?.trim() || "";
 
 const state = {
   csrfToken: "",
+  authSource: "",
   user: null,
-  vmUser: null,
-  ephemeralVmPassword: "", // Kept strictly in tab memory for seamless connect/handoff
+  rdpPassword: "",
   viewer: null,
+  connecting: false,
   isStandaloneTab:
-    window.location.pathname === "/desktop" ||
-    new URLSearchParams(window.location.search).get("view") === "desktop",
+    window.location.pathname === "/desktop" || urlParams.get("view") === "desktop",
 };
 
-// Cross-tab ephemeral session handoff when clicking "Open in new tab"
+// Cross-tab coordination so opening "/desktop" disconnects the embedded viewer cleanly
 const handoffChannel =
   typeof BroadcastChannel === "function" ? new BroadcastChannel("apigee_ai_demos_rdp") : null;
 
 const el = {
-  loginView: document.getElementById("login-view"),
-  loginAlert: document.getElementById("login-alert"),
-  googleLoginLink: document.getElementById("google-login-link"),
-  devLoginForm: document.getElementById("dev-login-form"),
-  devEmailInput: document.getElementById("dev-email"),
-  devLoginSubmit: document.getElementById("dev-login-submit"),
-
-  setupView: document.getElementById("setup-view"),
-  setupEmailDisplay: document.getElementById("setup-email-display"),
-  setupUsernameInput: document.getElementById("setup-username"),
-  setupPasswordInput: document.getElementById("new-password"),
-  toggleSetupPasswordBtn: document.getElementById("toggle-setup-password"),
-  setupForm: document.getElementById("setup-form"),
-  setupSubmitBtn: document.getElementById("setup-submit-btn"),
-  setupAlert: document.getElementById("setup-alert"),
-  setupLogoutBtn: document.getElementById("setup-logout-btn"),
+  unauthView: document.getElementById("unauth-view"),
+  unauthAlert: document.getElementById("unauth-alert"),
+  userSelectForm: document.getElementById("user-select-form"),
+  userParamInput: document.getElementById("user-param-input"),
+  userSelectSubmit: document.getElementById("user-select-submit"),
 
   workspaceView: document.getElementById("workspace-view"),
   navToggleBtn: document.getElementById("nav-toggle-btn"),
   navRail: document.getElementById("nav-rail"),
+  topbarBrandLink: document.getElementById("topbar-brand-link"),
   standaloneBadge: document.getElementById("standalone-badge"),
   openNewTabLink: document.getElementById("open-new-tab-link"),
-  openPasswordModalBtn: document.getElementById("open-password-modal-btn"),
   themeToggleBtn: document.getElementById("theme-toggle-btn"),
   topbarUserEmail: document.getElementById("topbar-user-email"),
   logoutBtn: document.getElementById("logout-btn"),
@@ -67,24 +47,11 @@ const el = {
   rdpViewport: document.getElementById("rdp-viewport"),
   rdpCanvas: document.getElementById("rdp-canvas"),
   rdpConnectOverlay: document.getElementById("rdp-connect-overlay"),
+  overlayHeading: document.getElementById("overlay-heading"),
+  overlayDesc: document.getElementById("overlay-desc"),
+  overlayUsername: document.getElementById("overlay-username"),
   rdpErrorBanner: document.getElementById("rdp-error-banner"),
-  rdpConnectForm: document.getElementById("rdp-connect-form"),
-  rdpUsernameInput: document.getElementById("rdp-username"),
-  rdpPasswordInput: document.getElementById("current-password"),
-  toggleRdpPasswordBtn: document.getElementById("toggle-rdp-password"),
-  rdpConnectBtn: document.getElementById("rdp-connect-btn"),
-  resetRdpPasswordBtn: document.getElementById("reset-rdp-password-btn"),
-
-  passwordDialog: document.getElementById("password-dialog"),
-  closePasswordDialogBtn: document.getElementById("close-password-dialog-btn"),
-  cancelPasswordDialogBtn: document.getElementById("cancel-password-dialog-btn"),
-  modalVmUsername: document.getElementById("modal-vm-username"),
-  modalUsernameInput: document.getElementById("modal-username-input"),
-  modalNewPasswordInput: document.getElementById("modal-new-password"),
-  toggleModalPasswordBtn: document.getElementById("toggle-modal-password"),
-  changePasswordForm: document.getElementById("change-password-form"),
-  savePasswordBtn: document.getElementById("save-password-btn"),
-  passwordModalAlert: document.getElementById("password-modal-alert"),
+  rdpReconnectBtn: document.getElementById("rdp-reconnect-btn"),
 
   clipboardDialog: document.getElementById("clipboard-dialog"),
   closeClipboardDialogBtn: document.getElementById("close-clipboard-dialog-btn"),
@@ -103,19 +70,6 @@ function setBanner(bannerEl, message) {
   bannerEl.hidden = false;
 }
 
-function wirePasswordVisibilityToggle(buttonEl, inputEl) {
-  buttonEl.addEventListener("click", () => {
-    const showing = inputEl.type === "text";
-    inputEl.type = showing ? "password" : "text";
-    buttonEl.setAttribute("aria-pressed", String(!showing));
-    const labelSpan = buttonEl.querySelector(".toggle-text");
-    if (labelSpan) {
-      labelSpan.textContent = showing ? "Show" : "Hide";
-    }
-  });
-}
-
-// Mandatory fallback for <dialog closedby="any"> on browsers without HTMLDialogElement.prototype.closedBy
 function installDialogLightDismissFallback(dialogEl) {
   if (!("closedBy" in HTMLDialogElement.prototype)) {
     dialogEl.addEventListener("click", (event) => {
@@ -133,20 +87,6 @@ function installDialogLightDismissFallback(dialogEl) {
   }
 }
 
-// Validate on blur, clear custom validity on input
-function wireBlurValidation(inputEl) {
-  inputEl.addEventListener("input", () => {
-    inputEl.setCustomValidity("");
-  });
-  inputEl.addEventListener("blur", () => {
-    if (inputEl.value.length > 0 && inputEl.minLength > 0 && inputEl.value.length < inputEl.minLength) {
-      inputEl.setCustomValidity(`Please enter at least ${inputEl.minLength} characters.`);
-      inputEl.reportValidity();
-    }
-  });
-}
-
-// Two-state color-scheme toggle (system setting vs pinned opposite)
 function setupThemeToggle() {
   const meta = document.querySelector('meta[name="color-scheme"]');
   const sysDarkQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -176,12 +116,18 @@ function setupThemeToggle() {
   });
 }
 
+function withUserQuery(basePath) {
+  if (!queryUserParam) return basePath;
+  const sep = basePath.includes("?") ? "&" : "?";
+  return `${basePath}${sep}user=${encodeURIComponent(queryUserParam)}`;
+}
+
 async function apiPost(path, payload) {
   const headers = { "Content-Type": "application/json" };
   if (state.csrfToken) {
     headers["X-CSRF-Token"] = state.csrfToken;
   }
-  const resp = await fetch(path, {
+  const resp = await fetch(withUserQuery(path), {
     method: "POST",
     credentials: "same-origin",
     headers,
@@ -195,8 +141,7 @@ async function apiPost(path, payload) {
 }
 
 function showExclusiveView(target) {
-  el.loginView.hidden = target !== "login";
-  el.setupView.hidden = target !== "setup";
+  el.unauthView.hidden = target !== "unauth";
   el.workspaceView.hidden = target !== "workspace";
 }
 
@@ -209,31 +154,43 @@ function ensureRdpViewer() {
       el.rdpStatusDot.dataset.state = status === "error" ? "disconnected" : status;
 
       if (status === "connected") {
+        state.connecting = false;
         el.rdpStatusText.textContent = detail ? `Connected · ${detail}` : "Connected";
         el.rdpConnectOverlay.hidden = true;
         el.disconnectBtn.hidden = false;
         el.clipboardBtn.disabled = false;
         el.cadBtn.disabled = false;
-        el.rdpConnectBtn.disabled = false;
+        el.rdpReconnectBtn.hidden = true;
         setBanner(el.rdpErrorBanner, "");
       } else if (status === "connecting") {
-        el.rdpStatusText.textContent = detail || "Connecting…";
-        el.rdpConnectBtn.disabled = true;
-      } else if (status === "error") {
-        el.rdpStatusText.textContent = "Disconnected";
+        state.connecting = true;
+        const msg = detail || "Connecting…";
+        el.rdpStatusText.textContent = msg;
+        el.overlayHeading.textContent = "Connecting to desktop";
+        el.overlayDesc.textContent = msg;
         el.rdpConnectOverlay.hidden = false;
+        el.rdpReconnectBtn.hidden = true;
+      } else if (status === "error") {
+        state.connecting = false;
+        el.rdpStatusText.textContent = "Disconnected";
+        el.overlayHeading.textContent = "Connection interrupted";
+        el.overlayDesc.textContent = `Signed in as ${state.user?.email || ""} (${state.user?.username || ""}).`;
+        el.rdpConnectOverlay.hidden = false;
+        el.rdpReconnectBtn.hidden = false;
         el.disconnectBtn.hidden = true;
         el.clipboardBtn.disabled = true;
         el.cadBtn.disabled = true;
-        el.rdpConnectBtn.disabled = false;
         setBanner(el.rdpErrorBanner, detail || "Unable to establish xrdp session.");
       } else {
+        state.connecting = false;
         el.rdpStatusText.textContent = detail || "Disconnected";
+        el.overlayHeading.textContent = detail === "Moved to new tab" ? "Active in new tab" : "Desktop disconnected";
+        el.overlayDesc.textContent = `Linux session user: ${state.user?.username || ""}`;
         el.rdpConnectOverlay.hidden = false;
+        el.rdpReconnectBtn.hidden = false;
         el.disconnectBtn.hidden = true;
         el.clipboardBtn.disabled = true;
         el.cadBtn.disabled = true;
-        el.rdpConnectBtn.disabled = false;
       }
     },
     onRemoteClipboard: (text) => {
@@ -243,33 +200,48 @@ function ensureRdpViewer() {
   return state.viewer;
 }
 
-function startRdpSession(password) {
-  if (!state.user || !password) return;
-  state.ephemeralVmPassword = password;
-  el.rdpPasswordInput.value = password;
+async function provisionAndAutoConnect() {
+  if (!state.user || state.connecting) return;
+  state.connecting = true;
   setBanner(el.rdpErrorBanner, "");
-  const viewer = ensureRdpViewer();
-  viewer.connect({
-    username: state.user.username,
-    password,
-  });
+  el.rdpConnectOverlay.hidden = false;
+  el.rdpReconnectBtn.hidden = true;
+  el.rdpStatusDot.dataset.state = "connecting";
+  el.overlayHeading.textContent = "Preparing workstation";
+  el.overlayDesc.textContent = `Ensuring Linux user '${state.user.username}' is ready…`;
+  el.rdpStatusText.textContent = `Provisioning '${state.user.username}'…`;
+
+  try {
+    const ensured = await apiPost("/api/vm-user/ensure", {});
+    state.user = ensured.user;
+    state.rdpPassword = ensured.rdpPassword;
+    el.sidebarVmUser.textContent = state.user.username;
+    el.sidebarVmHome.textContent = state.user.homeDir;
+
+    const viewer = ensureRdpViewer();
+    await viewer.connect({
+      username: state.user.username,
+      password: state.rdpPassword,
+    });
+  } catch (err) {
+    state.connecting = false;
+    el.rdpStatusDot.dataset.state = "disconnected";
+    el.rdpStatusText.textContent = "Disconnected";
+    el.overlayHeading.textContent = "Provisioning failed";
+    el.overlayDesc.textContent = `Could not prepare Linux user '${state.user.username}'.`;
+    el.rdpReconnectBtn.hidden = false;
+    setBanner(el.rdpErrorBanner, err.message);
+  }
 }
 
-function renderAuthenticatedApp() {
-  if (!state.vmUser?.provisioned) {
-    el.setupEmailDisplay.textContent = state.user.email;
-    el.setupUsernameInput.value = state.user.username;
-    el.setupPasswordInput.value = "";
-    showExclusiveView("setup");
-    return;
-  }
-
+function renderAuthenticatedWorkspace() {
   el.topbarUserEmail.textContent = state.user.email;
   el.sidebarVmUser.textContent = state.user.username;
-  el.sidebarVmHome.textContent = state.vmUser.homeDir;
-  el.rdpUsernameInput.value = state.user.username;
-  el.modalVmUsername.textContent = state.user.username;
-  el.modalUsernameInput.value = state.user.username;
+  el.sidebarVmHome.textContent = `/home/${state.user.username}`;
+  el.overlayUsername.textContent = state.user.username;
+  el.topbarBrandLink.href = withUserQuery("/");
+  el.openNewTabLink.href = withUserQuery("/desktop");
+  el.logoutBtn.hidden = state.authSource === "iap";
 
   if (state.isStandaloneTab) {
     el.navRail.hidden = true;
@@ -277,6 +249,9 @@ function renderAuthenticatedApp() {
     el.openNewTabLink.hidden = true;
     el.standaloneBadge.hidden = false;
     document.title = `Desktop (${state.user.username}) · Apigee AI Demos`;
+    if (handoffChannel) {
+      handoffChannel.postMessage({ type: "claimed_standalone_tab", username: state.user.username });
+    }
   } else {
     el.standaloneBadge.hidden = true;
     el.openNewTabLink.hidden = false;
@@ -284,126 +259,52 @@ function renderAuthenticatedApp() {
 
   showExclusiveView("workspace");
   ensureRdpViewer();
-
-  if (state.ephemeralVmPassword) {
-    startRdpSession(state.ephemeralVmPassword);
-  } else if (state.isStandaloneTab && handoffChannel) {
-    handoffChannel.postMessage({ type: "request_handoff", username: state.user.username });
-  }
+  void provisionAndAutoConnect();
 }
 
 async function bootstrap() {
   setupThemeToggle();
-  installDialogLightDismissFallback(el.passwordDialog);
   installDialogLightDismissFallback(el.clipboardDialog);
 
-  wirePasswordVisibilityToggle(el.toggleSetupPasswordBtn, el.setupPasswordInput);
-  wirePasswordVisibilityToggle(el.toggleRdpPasswordBtn, el.rdpPasswordInput);
-  wirePasswordVisibilityToggle(el.toggleModalPasswordBtn, el.modalNewPasswordInput);
-
-  wireBlurValidation(el.setupPasswordInput);
-  wireBlurValidation(el.modalNewPasswordInput);
-
-  // Check URL for OAuth callback errors
-  const params = new URLSearchParams(window.location.search);
-  const authError = params.get("auth_error");
-  if (authError) {
-    setBanner(
-      el.loginAlert,
-      AUTH_ERROR_MESSAGES[authError] || `Authentication failed (${authError}).`
-    );
-    window.history.replaceState({}, "", window.location.pathname);
-  }
-
   if (state.isStandaloneTab) {
-    el.googleLoginLink.href = "/api/auth/google/login?return_to=%2Fdesktop";
+    el.userSelectForm.action = "/desktop";
   }
 
-  // Listen for cross-tab handoff when user clicks "Open in new tab"
   if (handoffChannel) {
     handoffChannel.addEventListener("message", (event) => {
       const msg = event.data;
       if (!msg || !state.user || msg.username !== state.user.username) return;
-
-      if (msg.type === "request_handoff" && !state.isStandaloneTab && state.ephemeralVmPassword) {
-        // Disconnect embedded viewer cleanly so the new tab claims the xrdp session seamlessly
-        if (state.viewer?.connected) {
-          state.viewer.disconnect();
-          el.rdpStatusText.textContent = "Moved to new tab";
-          el.rdpConnectOverlay.hidden = false;
-          el.disconnectBtn.hidden = true;
-        }
-        handoffChannel.postMessage({
-          type: "handoff_credentials",
-          username: state.user.username,
-          password: state.ephemeralVmPassword,
-        });
-      } else if (
-        msg.type === "handoff_credentials" &&
-        state.isStandaloneTab &&
-        !state.viewer?.connected &&
-        msg.password
-      ) {
-        startRdpSession(msg.password);
+      if (msg.type === "claimed_standalone_tab" && !state.isStandaloneTab && state.viewer?.connected) {
+        state.viewer.disconnect();
+        el.rdpStatusDot.dataset.state = "disconnected";
+        el.rdpStatusText.textContent = "Moved to new tab";
+        el.overlayHeading.textContent = "Session open in new tab";
+        el.overlayDesc.textContent = `Linux desktop for '${state.user.username}' was transferred to the standalone tab.`;
+        el.rdpConnectOverlay.hidden = false;
+        el.rdpReconnectBtn.hidden = false;
+        el.disconnectBtn.hidden = true;
       }
     });
   }
 
-  // Sidebar collapse
   el.navToggleBtn.addEventListener("click", () => {
     const nextHidden = !el.navRail.hidden;
     el.navRail.hidden = nextHidden;
     el.navToggleBtn.setAttribute("aria-expanded", String(!nextHidden));
   });
 
-  // Dev login form (only visible when ALLOW_DEV_AUTH=true)
-  el.devLoginForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    setBanner(el.loginAlert, "");
-    el.devLoginSubmit.disabled = true;
-    try {
-      await apiPost("/api/auth/dev-login", { email: el.devEmailInput.value });
-      await refreshSession();
-    } catch (err) {
-      setBanner(el.loginAlert, err.message);
-    } finally {
-      el.devLoginSubmit.disabled = false;
-    }
+  el.rdpReconnectBtn.addEventListener("click", () => {
+    void provisionAndAutoConnect();
   });
 
-  // First-time VM user creation + password setup
-  el.setupForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    setBanner(el.setupAlert, "");
-    if (!el.setupForm.reportValidity()) return;
-
-    const chosenPassword = el.setupPasswordInput.value;
-    el.setupSubmitBtn.disabled = true;
-    try {
-      const res = await apiPost("/api/vm-user/password", { password: chosenPassword });
-      state.vmUser = res.vmUser;
-      state.ephemeralVmPassword = chosenPassword;
-      renderAuthenticatedApp();
-    } catch (err) {
-      setBanner(el.setupAlert, err.message);
-    } finally {
-      el.setupSubmitBtn.disabled = false;
-    }
-  });
-
-  // Connect to xrdp form
-  el.rdpConnectForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-    if (!el.rdpConnectForm.reportValidity()) return;
-    startRdpSession(el.rdpPasswordInput.value);
-  });
-
-  // Session toolbar controls
   el.disconnectBtn.addEventListener("click", () => {
     state.viewer?.disconnect();
     el.rdpStatusDot.dataset.state = "disconnected";
     el.rdpStatusText.textContent = "Disconnected";
+    el.overlayHeading.textContent = "Desktop disconnected";
+    el.overlayDesc.textContent = `Linux session user: ${state.user?.username || ""}`;
     el.rdpConnectOverlay.hidden = false;
+    el.rdpReconnectBtn.hidden = false;
     el.disconnectBtn.hidden = true;
     el.clipboardBtn.disabled = true;
     el.cadBtn.disabled = true;
@@ -422,43 +323,6 @@ async function bootstrap() {
     }
   });
 
-  // Change / reset VM password modal (from top bar or connect card)
-  const openPasswordDialog = () => {
-    setBanner(el.passwordModalAlert, "");
-    el.modalNewPasswordInput.value = "";
-    el.passwordDialog.showModal();
-  };
-  el.openPasswordModalBtn.addEventListener("click", openPasswordDialog);
-  el.resetRdpPasswordBtn.addEventListener("click", openPasswordDialog);
-  el.closePasswordDialogBtn.addEventListener("click", () => el.passwordDialog.close());
-  el.cancelPasswordDialogBtn.addEventListener("click", () => el.passwordDialog.close());
-
-  el.changePasswordForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    setBanner(el.passwordModalAlert, "");
-    if (!el.changePasswordForm.reportValidity()) return;
-
-    const newPassword = el.modalNewPasswordInput.value;
-    el.savePasswordBtn.disabled = true;
-    try {
-      const res = await apiPost("/api/vm-user/password", { password: newPassword });
-      state.vmUser = res.vmUser;
-      state.ephemeralVmPassword = newPassword;
-      el.rdpPasswordInput.value = newPassword;
-      el.passwordDialog.close();
-      if (!state.viewer?.connected) {
-        setBanner(
-          el.rdpErrorBanner,
-          `Linux password updated for '${state.user.username}'. Click Connect to desktop to sign in.`
-        );
-      }
-    } catch (err) {
-      setBanner(el.passwordModalAlert, err.message);
-    } finally {
-      el.savePasswordBtn.disabled = false;
-    }
-  });
-
   // Clipboard modal
   el.clipboardBtn.addEventListener("click", () => {
     el.clipboardDialog.showModal();
@@ -472,43 +336,31 @@ async function bootstrap() {
     el.rdpCanvas.focus();
   });
 
-  // Logout buttons
-  const doLogout = async () => {
+  el.logoutBtn.addEventListener("click", async () => {
     state.viewer?.disconnect();
-    state.ephemeralVmPassword = "";
     try {
       await apiPost("/api/auth/logout", {});
     } catch {
       // Ignore
     }
-    window.location.href = "/";
-  };
-  el.logoutBtn.addEventListener("click", doLogout);
-  el.setupLogoutBtn.addEventListener("click", doLogout);
+    window.location.href = state.isStandaloneTab ? "/desktop" : "/";
+  });
 
-  await refreshSession();
-}
-
-async function refreshSession() {
-  const resp = await fetch("/api/me", { credentials: "same-origin" });
-  const data = await resp.json();
+  const resp = await fetch(withUserQuery("/api/me"), { credentials: "same-origin" });
+  const data = await resp.json().catch(() => ({}));
 
   if (!data.authenticated) {
-    el.devLoginForm.hidden = !data.devAuthEnabled;
-    if (!data.oauthConfigured && !data.devAuthEnabled && el.loginAlert.hidden) {
-      setBanner(
-        el.loginAlert,
-        "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (or ALLOW_DEV_AUTH=true for local testing) to sign in."
-      );
+    if (data.error) {
+      setBanner(el.unauthAlert, data.error);
     }
-    showExclusiveView("login");
+    showExclusiveView("unauth");
     return;
   }
 
   state.csrfToken = data.csrfToken;
+  state.authSource = data.authSource;
   state.user = data.user;
-  state.vmUser = data.vmUser;
-  renderAuthenticatedApp();
+  renderAuthenticatedWorkspace();
 }
 
 bootstrap();

@@ -1,26 +1,21 @@
 import crypto from "node:crypto";
 import path from "node:path";
 
-export type VmUserMode = "system" | "mock";
-
 export interface AppConfig {
   port: number;
   host: string;
   publicBaseUrl: string | null;
   trustProxy: boolean;
   sessionSecret: string;
-  googleClientId: string;
-  googleClientSecret: string;
-  allowedGoogleDomain: string;
-  allowDevAuth: boolean;
+  iapEmailHeader: string;
   rdpHost: string;
   rdpPort: number;
-  vmUserMode: VmUserMode;
   useSudo: boolean;
   vmUserShell: string;
   vmUserGroups: string[];
   setupUserScript: string | null;
   onConnectScript: string | null;
+  usersFile: string;
   dataDir: string;
   publicDir: string;
 }
@@ -41,25 +36,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   // Automatically use `sudo -n` when not running as root unless explicitly disabled via USE_SUDO=false
   const useSudo = !isRoot && parseBool(env.USE_SUDO, true);
 
-  let vmUserMode: VmUserMode = isRoot || useSudo ? "system" : "system";
-  if (env.VM_USER_MODE === "mock") {
-    vmUserMode = "mock";
-  } else if (env.VM_USER_MODE === "system") {
-    vmUserMode = "system";
-  }
-
   let sessionSecret = env.SESSION_SECRET?.trim() ?? "";
   if (!sessionSecret) {
     sessionSecret = crypto.randomBytes(32).toString("hex");
-    if (env.NODE_ENV !== "test") {
-      console.warn(
-        "[config] SESSION_SECRET not set; generated an ephemeral secret for this process. Set SESSION_SECRET in production."
-      );
-    }
   }
 
+  const startDir = process.cwd();
   const isCompiledBinary = import.meta.dir.startsWith("/$bunfs");
-  const baseDir = isCompiledBinary ? process.cwd() : path.resolve(import.meta.dir, "..");
+  const baseDir = isCompiledBinary ? startDir : path.resolve(import.meta.dir, "..");
 
   const rawOnConnect = env.ON_CONNECT_SCRIPT?.trim();
   const onConnectScript =
@@ -69,19 +53,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         ? path.resolve(baseDir, rawOnConnect)
         : path.join(baseDir, "scripts", "on-connect.sh");
 
+  const usersFile = env.USERS_FILE?.trim()
+    ? path.resolve(startDir, env.USERS_FILE.trim())
+    : path.join(startDir, "users.yaml");
+
   return {
     port: parsePort(env.PORT, 8080),
     host: env.HOST?.trim() || "127.0.0.1",
     publicBaseUrl: env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, "") || null,
     trustProxy: parseBool(env.TRUST_PROXY, true),
     sessionSecret,
-    googleClientId: env.GOOGLE_CLIENT_ID?.trim() ?? "",
-    googleClientSecret: env.GOOGLE_CLIENT_SECRET?.trim() ?? "",
-    allowedGoogleDomain: (env.ALLOWED_GOOGLE_DOMAIN?.trim() || "google.com").toLowerCase(),
-    allowDevAuth: parseBool(env.ALLOW_DEV_AUTH, false),
+    iapEmailHeader: (env.IAP_EMAIL_HEADER?.trim() || "x-goog-authenticated-user-email").toLowerCase(),
     rdpHost: env.RDP_HOST?.trim() || "127.0.0.1",
     rdpPort: parsePort(env.RDP_PORT, 3389),
-    vmUserMode,
     useSudo,
     vmUserShell: env.VM_USER_SHELL?.trim() || "/bin/bash",
     vmUserGroups: (env.VM_USER_GROUPS ?? "")
@@ -90,6 +74,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       .filter(Boolean),
     setupUserScript: env.SETUP_USER_SCRIPT?.trim() || null,
     onConnectScript,
+    usersFile,
     dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : path.join(baseDir, "data"),
     publicDir: path.join(baseDir, "public"),
   };

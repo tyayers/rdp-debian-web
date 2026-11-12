@@ -2,16 +2,12 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { loadConfig, type AppConfig } from "./config.ts";
 import {
-  buildGoogleAuthStart,
   clearSessionCookieHeaders,
-  createSessionCookieHeader,
-  deriveLinuxUsername,
   getExternalOrigin,
-  getSessionFromRequest,
-  handleGoogleAuthCallback,
+  resolveRequestIdentity,
   type SessionUser,
 } from "./auth.ts";
-import { VmUserManager } from "./vm-users.ts";
+import { VmUserManager, type SystemUserAdapter } from "./vm-users.ts";
 import { EMBEDDED_PUBLIC_FILES } from "./embedded-assets.ts";
 import {
   cleanupSockets,
@@ -48,7 +44,8 @@ const DEMO_CATALOG: DemoCatalogItem[] = [
   {
     id: "vm-desktop",
     title: "VM Remote Desktop",
-    summary: "Interactive Debian workstation session over xrdp for running Apigee AI tools and local labs.",
+    summary:
+      "Interactive Debian workstation session over xrdp for running Apigee AI tools and local labs.",
     kind: "workstation",
     status: "ready",
   },
@@ -80,7 +77,7 @@ function applySecurityHeaders(headers: Headers, cspNonce?: string): void {
       "connect-src 'self' ws: wss:",
       "frame-ancestors 'self'",
       "base-uri 'none'",
-      "form-action 'self' https://accounts.google.com",
+      "form-action 'self'",
     ].join("; ")
   );
 }
@@ -95,13 +92,10 @@ function jsonResponse(data: unknown, status = 200, extraHeaders?: HeadersInit): 
 
 function isAllowedFetchMetadata(req: Request, pathname: string): boolean {
   const site = req.headers.get("sec-fetch-site");
-  if (!site) return true; // Non-browser or legacy client
+  if (!site) return true;
+  if (site === "same-origin" || site === "none") return true;
 
-  if (site === "same-origin" || site === "none") {
-    return true;
-  }
-
-  // Allow top-level OAuth redirect returning from accounts.google.com
+  // Allow top-level navigations (e.g. returning from GCP IAP login redirect or clicking external link)
   const mode = req.headers.get("sec-fetch-mode");
   const dest = req.headers.get("sec-fetch-dest");
   if (
@@ -109,7 +103,7 @@ function isAllowedFetchMetadata(req: Request, pathname: string): boolean {
     mode === "navigate" &&
     dest !== "object" &&
     dest !== "embed" &&
-    (pathname === "/" || pathname === "/desktop" || pathname === "/api/auth/google/callback")
+    (pathname === "/" || pathname === "/desktop")
   ) {
     return true;
   }
@@ -135,9 +129,12 @@ function verifyWsOrigin(req: Request, config: AppConfig): boolean {
   }
 }
 
-export function createAppServer(customConfig?: Partial<AppConfig>) {
+export function createAppServer(
+  customConfig?: Partial<AppConfig>,
+  systemAdapter?: SystemUserAdapter
+) {
   const config: AppConfig = { ...loadConfig(), ...customConfig };
-  const vmUsers = new VmUserManager(config);
+  const vmUsers = new VmUserManager(config, systemAdapter);
 
   const server = Bun.serve<RdpWsContext>({
     hostname: config.host,
@@ -158,25 +155,23 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
           );
           return jsonResponse({ error: "Invalid WebSocket origin" }, 403);
         }
-        const session = getSessionFromRequest(req, config);
-        if (!session) {
-          console.warn(`${new Date().toISOString()} [rdp] Blocked WebSocket upgrade: unauthenticated request`);
+
+        const resolved = resolveRequestIdentity(req, config);
+        if (!resolved || "error" in resolved) {
+          console.warn(
+            `${new Date().toISOString()} [rdp] Blocked WebSocket upgrade: ${
+              resolved && "error" in resolved ? resolved.error : "no IAP header or ?user= session"
+            }`
+          );
           return jsonResponse({ error: "Authentication required" }, 401);
         }
-        const status = await vmUsers.getStatus(session.username);
-        if (!status.provisioned) {
-          console.warn(
-            `${new Date().toISOString()} [rdp] Blocked WebSocket upgrade for '${session.username}': local VM user not provisioned (existsOnSystem=${status.existsOnSystem}, mode=${config.vmUserMode})`
-          );
-          return jsonResponse({ error: "Local VM account must be initialized first" }, 403);
-        }
 
-        const wsCtx = createRdpWsContext(session, config);
+        const wsCtx = createRdpWsContext(resolved.session, config);
         const upgraded = srv.upgrade(req, { data: wsCtx });
         if (upgraded) {
           rdpLog(
             wsCtx,
-            `WebSocket upgraded (email=${session.email}, vmUserMode=${config.vmUserMode}, existsOnSystem=${status.existsOnSystem})`
+            `WebSocket upgraded (email=${resolved.session.email}, source=${resolved.source})`
           );
           return undefined;
         }
@@ -188,95 +183,78 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
         return jsonResponse({ ok: true });
       }
 
-      // Session & VM user status
+      // Identity lookup (read-only: inspects ?user=..., GCP IAP header, or session cookie)
       if (pathname === "/api/me" && req.method === "GET") {
-        const session = getSessionFromRequest(req, config);
-        const oauthConfigured = Boolean(config.googleClientId && config.googleClientSecret);
-
-        if (!session) {
-          return jsonResponse({
-            authenticated: false,
-            oauthConfigured,
-            devAuthEnabled: config.allowDevAuth,
-            allowedDomain: config.allowedGoogleDomain,
-          });
+        const resolved = resolveRequestIdentity(req, config);
+        if (!resolved) {
+          return jsonResponse({ authenticated: false });
+        }
+        if ("error" in resolved) {
+          return jsonResponse({ authenticated: false, error: resolved.error }, 400);
         }
 
-        try {
-          const vmStatus = await vmUsers.getStatus(session.username);
-          return jsonResponse({
-            authenticated: true,
-            oauthConfigured,
-            devAuthEnabled: config.allowDevAuth,
-            allowedDomain: config.allowedGoogleDomain,
-            csrfToken: session.csrfToken,
-            user: {
-              email: session.email,
-              name: session.name,
-              username: session.username,
-            },
-            vmUser: vmStatus,
-            vmUserMode: config.vmUserMode,
-            demos: DEMO_CATALOG,
-          });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : "Failed to inspect VM account";
-          return jsonResponse({ error: message }, 500);
-        }
-      }
-
-      // Google OAuth start & callback
-      if (pathname === "/api/auth/google/login" && req.method === "GET") {
-        const resp = buildGoogleAuthStart(req, config);
-        applySecurityHeaders(resp.headers);
-        return resp;
-      }
-
-      if (pathname === "/api/auth/google/callback" && req.method === "GET") {
-        const resp = await handleGoogleAuthCallback(req, config);
-        applySecurityHeaders(resp.headers);
-        return resp;
-      }
-
-      // Opt-in local dev login (strictly disabled unless ALLOW_DEV_AUTH=true)
-      if (pathname === "/api/auth/dev-login" && req.method === "POST") {
-        if (!config.allowDevAuth) {
-          return jsonResponse({ error: "Not found" }, 404);
-        }
-        let body: { email?: string; name?: string };
-        try {
-          body = (await req.json()) as { email?: string; name?: string };
-        } catch {
-          return jsonResponse({ error: "Invalid JSON body" }, 400);
-        }
-
-        const email = (body.email ?? "").trim().toLowerCase();
-        let username: string;
-        try {
-          username = deriveLinuxUsername(email, config.allowedGoogleDomain);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : "Invalid email";
-          return jsonResponse({ error: msg }, 403);
-        }
-
-        const { cookie } = createSessionCookieHeader(
+        const extraHeaders = resolved.setCookie ? { "Set-Cookie": resolved.setCookie } : undefined;
+        return jsonResponse(
           {
-            sub: `dev:${email}`,
-            email,
-            name: body.name?.trim() || username,
-            username,
+            authenticated: true,
+            authSource: resolved.source,
+            csrfToken: resolved.session.csrfToken,
+            user: {
+              email: resolved.session.email,
+              username: resolved.session.username,
+            },
+            demos: DEMO_CATALOG,
           },
-          req,
-          config
+          200,
+          extraHeaders
         );
-
-        return jsonResponse({ ok: true }, 200, { "Set-Cookie": cookie });
       }
 
-      // Logout
+      // Automatic Linux user creation + users.yaml password generation/retrieval
+      if (pathname === "/api/vm-user/ensure" && req.method === "POST") {
+        const resolved = resolveRequestIdentity(req, config);
+        if (!resolved || "error" in resolved) {
+          return jsonResponse({ error: "Authentication required" }, 401);
+        }
+        if (!verifyCsrf(req, resolved.session)) {
+          return jsonResponse({ error: "Invalid CSRF token" }, 403);
+        }
+
+        try {
+          const provisioned = await vmUsers.ensureProvisionedUser(
+            resolved.session.username,
+            resolved.session.email
+          );
+          const extraHeaders = resolved.setCookie
+            ? { "Set-Cookie": resolved.setCookie }
+            : undefined;
+          return jsonResponse(
+            {
+              ok: true,
+              created: provisioned.created,
+              user: {
+                email: provisioned.email,
+                username: provisioned.username,
+                homeDir: provisioned.homeDir,
+              },
+              rdpPassword: provisioned.password,
+            },
+            200,
+            extraHeaders
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Failed to provision Linux user";
+          console.error(
+            `${new Date().toISOString()} [vm-users] Failed provisioning '${resolved.session.username}': ${msg}`
+          );
+          return jsonResponse({ error: msg }, 500);
+        }
+      }
+
+      // Clear local cookie session (e.g. switching ?user=...)
       if (pathname === "/api/auth/logout" && req.method === "POST") {
-        const session = getSessionFromRequest(req, config);
-        if (session && !verifyCsrf(req, session)) {
+        const resolved = resolveRequestIdentity(req, config);
+        if (resolved && !("error" in resolved) && !verifyCsrf(req, resolved.session)) {
           return jsonResponse({ error: "Invalid CSRF token" }, 403);
         }
         const headers = new Headers();
@@ -287,48 +265,11 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
         return jsonResponse({ ok: true }, 200, headers);
       }
 
-      // Create VM user (first login) or change VM user password
-      if (pathname === "/api/vm-user/password" && req.method === "POST") {
-        const session = getSessionFromRequest(req, config);
-        if (!session) {
-          return jsonResponse({ error: "Authentication required" }, 401);
-        }
-        if (!verifyCsrf(req, session)) {
-          return jsonResponse({ error: "Invalid CSRF token" }, 403);
-        }
-
-        let body: { password?: string };
-        try {
-          body = (await req.json()) as { password?: string };
-        } catch {
-          return jsonResponse({ error: "Invalid JSON body" }, 400);
-        }
-
-        try {
-          const result = await vmUsers.setupOrUpdatePassword(
-            session.username,
-            session.email,
-            body.password ?? ""
-          );
-          return jsonResponse({
-            ok: true,
-            created: result.created,
-            vmUser: result.status,
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : "Failed to configure VM user";
-          console.error(
-            `${new Date().toISOString()} [vm-users] Failed configuring '${session.username}' (mode=${config.vmUserMode}): ${msg}`
-          );
-          return jsonResponse({ error: msg }, 400);
-        }
-      }
-
       if (pathname.startsWith("/api/")) {
         return jsonResponse({ error: "Not found" }, 404);
       }
 
-      // Serve index.html for "/" and "/desktop" (standalone full-tab desktop mode)
+      // Serve index.html for "/" and "/desktop" (also establishing cookie when ?user=... or IAP header is present)
       if (req.method === "GET" || req.method === "HEAD") {
         if (pathname === "/" || pathname === "/desktop") {
           const nonce = crypto.randomBytes(16).toString("base64");
@@ -340,8 +281,12 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
           const html = htmlTemplate.replaceAll("{{CSP_NONCE}}", nonce);
           const headers = new Headers({
             "Content-Type": "text/html; charset=utf-8",
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-store",
           });
+          const resolved = resolveRequestIdentity(req, config);
+          if (resolved && !("error" in resolved) && resolved.setCookie) {
+            headers.append("Set-Cookie", resolved.setCookie);
+          }
           applySecurityHeaders(headers, nonce);
           return new Response(req.method === "HEAD" ? null : html, { status: 200, headers });
         }
@@ -349,10 +294,7 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
         // Safe static asset resolution inside publicDir (with embedded binary fallback)
         const safeRel = path.posix.normalize(pathname).replace(/^\/+/, "");
         const resolved = path.resolve(config.publicDir, safeRel);
-        if (
-          resolved.startsWith(config.publicDir + path.sep) &&
-          !safeRel.includes("..")
-        ) {
+        if (resolved.startsWith(config.publicDir + path.sep) && !safeRel.includes("..")) {
           const file = Bun.file(resolved);
           if (await file.exists()) {
             const ext = path.extname(resolved).toLowerCase();
@@ -403,11 +345,10 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
 
 if (import.meta.main) {
   const { server, config, vmUsers } = createAppServer();
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
   console.log(
-    `[Apigee AI Demos] Listening on http://${server.hostname}:${server.port} | xrdp=${config.rdpHost}:${config.rdpPort} | vmUserMode=${config.vmUserMode}${
-      config.vmUserMode === "mock"
-        ? " (WARNING: mock mode does NOT create real Linux users for xrdp!)"
-        : ""
+    `[Apigee AI Demos] Listening on http://${server.hostname}:${server.port} | xrdp=${config.rdpHost}:${config.rdpPort} | usersFile=${config.usersFile}${
+      !isRoot ? " | privilege=sudo -n (run with sudo if passwordless sudo is not configured)" : " | privilege=root"
     }`
   );
   // Provision/update shared VM desktop apps once at server startup for all users

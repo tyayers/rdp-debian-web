@@ -18,8 +18,8 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <!-- View 1: Google Authentication (@google.com only) -->
-  <section id="login-view" class="centered-shell" hidden>
+  <!-- Shown only when accessed outside GCP IAP without a ?user= URL parameter -->
+  <section id="unauth-view" class="centered-shell" hidden>
     <div class="auth-card">
       <div class="brand-row">
         <span class="brand-glyph" aria-hidden="true">
@@ -33,117 +33,36 @@
         <span class="brand-label">Apigee AI Demos</span>
       </div>
 
-      <h1 class="card-title">Sign in to continue</h1>
+      <h1 class="card-title">Continue to workstation</h1>
       <p class="card-subtitle">
-        Access your personal Debian demo workstation and Apigee AI lab scenarios. Restricted to <code>@google.com</code> accounts.
+        Behind Google Cloud IAP your identity is detected automatically. For direct access, pass <code>?user=test@example.com</code> or enter an email below.
       </p>
 
-      <div id="login-alert" class="status-banner" role="alert" aria-live="polite" hidden></div>
+      <div id="unauth-alert" class="status-banner" role="alert" aria-live="polite" hidden></div>
 
-      <a id="google-login-link" href="/api/auth/google/login" class="btn btn-primary btn-block">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
-          <path d="M12.24 10.285V14.4h6.806c-.275 1.765-2.056 5.174-6.806 5.174-4.095 0-7.439-3.389-7.439-7.574s3.345-7.574 7.439-7.574c2.33 0 3.891.989 4.785 1.849l3.254-3.138C18.189 1.186 15.479 0 12.24 0c-6.635 0-12 5.365-12 12s5.365 12 12 12c6.926 0 11.52-4.869 11.52-11.726 0-.788-.085-1.39-.189-1.989H12.24z"></path>
-        </svg>
-        <span>Sign in with Google</span>
-      </a>
-
-      <!-- Shown only when ALLOW_DEV_AUTH=true for local development -->
-      <form id="dev-login-form" class="stacked-form divider-top" method="post" action="/api/auth/dev-login" hidden>
+      <form id="user-select-form" class="stacked-form" method="get" action="/">
         <div class="field-group">
-          <label for="dev-email">Developer test email (<code>@google.com</code>)</label>
-          <input
-            type="email"
-            id="dev-email"
-            name="email"
-            inputmode="email"
-            autocomplete="username"
-            enterkeyhint="done"
-            required
-          >
-        </div>
-        <button type="submit" id="dev-login-submit" class="btn btn-secondary btn-block">
-          Sign in (local dev mode)
-        </button>
-      </form>
-    </div>
-  </section>
-
-  <!-- View 2: First-time Local VM User Provisioning -->
-  <section id="setup-view" class="centered-shell" hidden>
-    <div class="auth-card">
-      <div class="card-topbar">
-        <div class="brand-row">
-          <span class="brand-glyph" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-              <circle cx="12" cy="7" r="4"></circle>
-            </svg>
-          </span>
-          <span class="brand-label">Apigee AI Demos</span>
-        </div>
-        <button type="button" id="setup-logout-btn" class="btn btn-ghost btn-compact">Sign out</button>
-      </div>
-
-      <h1 class="card-title">Set up your VM account</h1>
-      <p class="card-subtitle">
-        Signed in as <strong id="setup-email-display"></strong>. Choose a local Linux password to provision your VM user and launch desktop sessions.
-      </p>
-
-      <div id="setup-alert" class="status-banner" role="alert" aria-live="polite" hidden></div>
-
-      <form id="setup-form" class="stacked-form" method="post" action="/api/vm-user/password">
-        <div class="field-group">
-          <label for="setup-username">Local VM username</label>
+          <label for="user-param-input">User email or Linux username</label>
           <input
             type="text"
-            id="setup-username"
-            name="username"
+            id="user-param-input"
+            name="user"
             autocomplete="username"
-            readonly
-          >
-        </div>
-
-        <div class="field-group">
-          <div class="label-row">
-            <label for="new-password">Local VM password</label>
-            <button
-              type="button"
-              id="toggle-setup-password"
-              class="btn-inline-toggle"
-              aria-pressed="false"
-              aria-label="Show password"
-              aria-describedby="setup-toggle-warn"
-            >
-              <svg class="icon-eye" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
-                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
-              </svg>
-              <span class="toggle-text">Show</span>
-            </button>
-          </div>
-          <span id="setup-toggle-warn" class="visually-hidden">Warning: this displays your password on screen.</span>
-          <input
-            type="password"
-            id="new-password"
-            name="new-password"
-            autocomplete="new-password"
-            minlength="8"
-            maxlength="128"
             enterkeyhint="done"
-            aria-describedby="setup-password-hint"
+            aria-describedby="user-param-hint"
             required
           >
-          <span id="setup-password-hint" class="field-hint">Minimum 8 characters. Used for your Linux account and xrdp login.</span>
+          <span id="user-param-hint" class="field-hint">Creates the local Linux user automatically if needed and connects to xrdp.</span>
         </div>
 
-        <button type="submit" id="setup-submit-btn" class="btn btn-primary btn-block">
-          Create VM account
+        <button type="submit" id="user-select-submit" class="btn btn-primary btn-block">
+          Open desktop
         </button>
       </form>
     </div>
   </section>
 
-  <!-- View 3: Main Application Workspace & Standalone Desktop Tab -->
+  <!-- Main Application Workspace & Standalone Desktop Tab -->
   <div id="workspace-view" class="app-layout" hidden>
     <header class="topbar">
       <div class="topbar-left">
@@ -161,7 +80,7 @@
           </svg>
         </button>
 
-        <a href="/" class="topbar-brand">
+        <a id="topbar-brand-link" href="/" class="topbar-brand">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
             <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
@@ -190,15 +109,6 @@
           <span>Open in new tab</span>
         </a>
 
-        <button type="button" id="open-password-modal-btn" class="btn btn-ghost btn-compact">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="7.5" cy="15.5" r="5.5"></circle>
-            <path d="m21 2-9.6 9.6"></path>
-            <path d="m15.5 7.5 3 3L22 7l-3-3"></path>
-          </svg>
-          <span>Reset VM password</span>
-        </button>
-
         <button type="button" id="theme-toggle-btn" class="icon-btn" aria-label="Switch color theme">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="4"></circle>
@@ -208,7 +118,7 @@
 
         <span id="topbar-user-email" class="user-chip"></span>
 
-        <button type="button" id="logout-btn" class="icon-btn" aria-label="Sign out">
+        <button type="button" id="logout-btn" class="icon-btn" aria-label="Switch user" hidden>
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
             <polyline points="16 17 21 12 16 7"></polyline>
@@ -260,7 +170,7 @@
           <div class="session-bar-left">
             <span id="rdp-status-dot" class="state-indicator" data-state="disconnected" aria-hidden="true"></span>
             <h1 class="stage-heading">VM Remote Desktop</h1>
-            <span id="rdp-status-text" class="session-status-label" aria-live="polite">Disconnected</span>
+            <span id="rdp-status-text" class="session-status-label" aria-live="polite">Connecting…</span>
           </div>
 
           <div class="session-bar-actions">
@@ -299,7 +209,7 @@
             aria-label="Remote Linux desktop session"
           ></canvas>
 
-          <!-- Overlay prompt shown when RDP session is not yet connected -->
+          <!-- Overlay shown while auto-connecting or after manual disconnect -->
           <div id="rdp-connect-overlay" class="rdp-overlay">
             <div class="connect-panel">
               <div class="connect-header">
@@ -308,127 +218,24 @@
                   <line x1="8" y1="21" x2="16" y2="21"></line>
                   <line x1="12" y1="17" x2="12" y2="21"></line>
                 </svg>
-                <h2>Connect to xrdp session</h2>
+                <h2 id="overlay-heading">Connecting to desktop</h2>
               </div>
 
-              <p class="connect-desc">
-                Enter your local VM password to launch or resume your Linux desktop session.
+              <p id="overlay-desc" class="connect-desc">
+                Preparing Linux workstation session for <code id="overlay-username"></code>…
               </p>
 
               <div id="rdp-error-banner" class="status-banner" role="alert" aria-live="polite" hidden></div>
 
-              <form id="rdp-connect-form" class="stacked-form" method="post" action="#connect">
-                <div class="field-group">
-                  <label for="rdp-username">Linux username</label>
-                  <input
-                    type="text"
-                    id="rdp-username"
-                    name="username"
-                    autocomplete="username"
-                    readonly
-                  >
-                </div>
-
-                <div class="field-group">
-                  <div class="label-row">
-                    <label for="current-password">VM password</label>
-                    <button
-                      type="button"
-                      id="toggle-rdp-password"
-                      class="btn-inline-toggle"
-                      aria-pressed="false"
-                      aria-label="Show password"
-                    >
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
-                        <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path>
-                        <circle cx="12" cy="12" r="3"></circle>
-                      </svg>
-                      <span class="toggle-text">Show</span>
-                    </button>
-                  </div>
-                  <input
-                    type="password"
-                    id="current-password"
-                    name="password"
-                    autocomplete="current-password"
-                    enterkeyhint="done"
-                    required
-                  >
-                </div>
-
-                <div class="stacked-actions">
-                  <button type="submit" id="rdp-connect-btn" class="btn btn-primary btn-block">
-                    Connect to desktop
-                  </button>
-                  <button type="button" id="reset-rdp-password-btn" class="btn btn-secondary btn-block">
-                    Change / reset Linux password
-                  </button>
-                </div>
-              </form>
+              <button type="button" id="rdp-reconnect-btn" class="btn btn-primary btn-block" hidden>
+                Reconnect to desktop
+              </button>
             </div>
           </div>
         </div>
       </main>
     </div>
   </div>
-
-  <!-- Modal Dialog: Change / Reset Local VM Password -->
-  <dialog id="password-dialog" class="modal-dialog" closedby="any" aria-labelledby="password-dialog-title">
-    <div class="modal-inner">
-      <div class="modal-header">
-        <h2 id="password-dialog-title">Change / reset Linux password</h2>
-        <button type="button" id="close-password-dialog-btn" class="icon-btn" aria-label="Close dialog">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true">
-            <path d="M18 6 6 18M6 6l12 12"></path>
-          </svg>
-        </button>
-      </div>
-
-      <p class="modal-desc">
-        Sets a new local Linux password for <code id="modal-vm-username"></code> on this VM (used for xrdp login).
-      </p>
-
-      <div id="password-modal-alert" class="status-banner" role="alert" aria-live="polite" hidden></div>
-
-      <form id="change-password-form" class="stacked-form" method="post" action="/api/vm-user/password">
-        <input type="text" id="modal-username-input" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" readonly>
-
-        <div class="field-group">
-          <div class="label-row">
-            <label for="modal-new-password">New VM password</label>
-            <button
-              type="button"
-              id="toggle-modal-password"
-              class="btn-inline-toggle"
-              aria-pressed="false"
-              aria-label="Show new password"
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
-                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
-              </svg>
-              <span class="toggle-text">Show</span>
-            </button>
-          </div>
-          <input
-            type="password"
-            id="modal-new-password"
-            name="new-password"
-            autocomplete="new-password"
-            minlength="8"
-            maxlength="128"
-            enterkeyhint="done"
-            required
-          >
-        </div>
-
-        <div class="modal-actions">
-          <button type="button" id="cancel-password-dialog-btn" class="btn btn-ghost">Cancel</button>
-          <button type="submit" id="save-password-btn" class="btn btn-primary">Update password</button>
-        </div>
-      </form>
-    </div>
-  </dialog>
 
   <!-- Modal Dialog: Clipboard Sync -->
   <dialog id="clipboard-dialog" class="modal-dialog" closedby="any" aria-labelledby="clipboard-dialog-title">

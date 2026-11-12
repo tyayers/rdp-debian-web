@@ -194,6 +194,14 @@ export function handleRdpWsMessage(
 
     void (async () => {
       try {
+        await vmUsers.ensureProvisionedUser(ws.data.user.username, ws.data.user.email);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendErrorAndClose(ws, msg);
+        return;
+      }
+
+      try {
         await vmUsers.runOnConnectHook(ws.data.user.username, {
           onProgress: (statusText) => sendStatusFrame(ws, statusText),
         });

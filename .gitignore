@@ -3,3 +3,4 @@ data/
 .env
 wasm/target/
 apigee-ai-demos
+users.yaml
