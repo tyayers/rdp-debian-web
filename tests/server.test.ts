@@ -434,6 +434,11 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
     expect(await Bun.file(path.join(autostartDir, "lxqt-panel.desktop")).exists()).toBe(false);
     expect(firstPass).toContain("[General]\n__userfile__=true\npanels=panel1");
     expect(firstPass).toContain("position=Top");
+    expect(firstPass).toContain("plugins=mainmenu, taskbar, spacer, kbindicator, signout");
+    expect(firstPass).toContain("menu_file=/etc/xdg/menus/");
+    expect(firstPass).toContain("expandable=true");
+    expect(firstPass).toContain("[signout]\nalignment=Right\ntype=quicklaunch");
+    expect(firstPass).toContain("apigee-signout.desktop");
     expect(plankDesktop).toContain("Exec=plank");
     expect(sessionInitDesktop).toContain("Exec=/usr/local/bin/apigee-session-init");
     expect(wallpaperStat.size).toBe(sourceWallpaperStat.size);

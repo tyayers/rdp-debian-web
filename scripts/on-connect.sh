@@ -60,21 +60,24 @@ install_or_update_system_tools() {
       ;;
   esac
 
-  # 1a. Base desktop packages: Plank, QTerminal, PCManFM-Qt, FeatherPad, GIO/GVFS & dconf
+  # 1a. Base desktop packages: Plank, QTerminal, PCManFM-Qt, FeatherPad, LXQt menu data, GIO/GVFS & dconf
   local missing_base=0
   local cmd
-  for cmd in curl gpg plank qterminal pcmanfm-qt featherpad gio dconf; do
+  for cmd in curl gpg plank qterminal pcmanfm-qt featherpad lxqt-leave gio dconf; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
     fi
   done
+  if [[ ! -f /etc/xdg/menus/lxqt-applications.menu ]]; then
+    missing_base=1
+  fi
   if [[ "$missing_base" -eq 1 ]]; then
-    echo "[status] Installing Plank, Terminal, Text Editor & desktop utilities..."
+    echo "[status] Installing Plank, LXQt menu data, Terminal, Text Editor & desktop utilities..."
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
       ca-certificates curl gpg plank qterminal pcmanfm-qt featherpad \
-      libglib2.0-bin gvfs dconf-cli
+      lxqt-menu-data lxqt-session libglib2.0-bin gvfs dconf-cli
   fi
 
   # 1b. VSCodium (codium)
@@ -279,7 +282,7 @@ EOF
     chmod 0644 /usr/share/applications/antigravity-ide.desktop
   fi
 
-  # 1g. Shared "Home" launcher for Plank dock (opens user's Home directory directly)
+  # 1g. Shared "Home" launcher (Plank dock) & "Sign Out" launcher (LXQt top panel right side)
   cat >/usr/share/applications/apigee-user-home.desktop <<'EOF'
 [Desktop Entry]
 Version=1.0
@@ -294,10 +297,26 @@ Categories=System;FileManager;
 EOF
   chmod 0644 /usr/share/applications/apigee-user-home.desktop
 
+  cat >/usr/share/applications/apigee-signout.desktop <<'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Sign Out
+Comment=Sign out of desktop session
+Exec=lxqt-leave --logout
+Icon=system-log-out
+Terminal=false
+NoDisplay=true
+Categories=System;
+EOF
+  chmod 0644 /usr/share/applications/apigee-signout.desktop
+
   # 1h. Session startup helper ensuring GVFS desktop shortcut trust, Plank dock order, and lxqt-panel
   cat >/usr/local/bin/apigee-session-init <<'EOF'
 #!/usr/bin/env bash
 # Runs inside the user's active LXQt D-Bus/X11 session on login (and on reconnect)
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-LXQt}"
+export XDG_MENU_PREFIX="${XDG_MENU_PREFIX:-lxqt-}"
 
 apply_trust_and_dock() {
   # 1. Mark all ~/Desktop/*.desktop shortcuts trusted in GVFS so they launch on double-click without prompts
@@ -426,8 +445,36 @@ echo "[status] Configuring LXQt desktop, wallpaper & Plank launchers..."
 
 # 2. Enforce LXQt top panel configuration (~/.config/lxqt/panel.conf) & ensure panel is never disabled
 rm -f -- "$HOMEDIR/.config/autostart/lxqt-panel.desktop"
+ensure_user_dir "$HOMEDIR/.local"
+ensure_user_dir "$HOMEDIR/.local/share"
+USER_APPS_DIR="$HOMEDIR/.local/share/applications"
+ensure_user_dir "$USER_APPS_DIR"
+
+SIGNOUT_LAUNCHER_PATH="$APPS_DIR/apigee-signout.desktop"
+if [[ ! -f "$SIGNOUT_LAUNCHER_PATH" ]]; then
+  SIGNOUT_LAUNCHER_PATH="$USER_APPS_DIR/apigee-signout.desktop"
+  write_user_file "$SIGNOUT_LAUNCHER_PATH" 0644 <<'EOF' || true
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Sign Out
+Comment=Sign out of desktop session
+Exec=lxqt-leave --logout
+Icon=system-log-out
+Terminal=false
+NoDisplay=true
+Categories=System;
+EOF
+fi
+
+LXQT_MENU_FILE="/etc/xdg/menus/lxqt-applications.menu"
+if [[ ! -f "$LXQT_MENU_FILE" && -f /etc/xdg/menus/lxqt-panel-applications.menu ]]; then
+  LXQT_MENU_FILE="/etc/xdg/menus/lxqt-panel-applications.menu"
+fi
+
 PANEL_CONF="$HOMEDIR/.config/lxqt/panel.conf"
-if write_user_file "$PANEL_CONF" 0644 <<'EOF'
+write_panel_conf() {
+  write_user_file "$PANEL_CONF" 0644 <<EOF
 [General]
 __userfile__=true
 panels=panel1
@@ -440,10 +487,11 @@ iconSize=22
 width=100
 width-percent=true
 reserve-space=true
-plugins=mainmenu, taskbar, spacer, kbindicator
+plugins=mainmenu, taskbar, spacer, kbindicator, signout
 
 [mainmenu]
 type=mainmenu
+menu_file=$LXQT_MENU_FILE
 
 [taskbar]
 type=taskbar
@@ -454,23 +502,33 @@ showOnlyCurrentDesktop=false
 [spacer]
 type=spacer
 size=0
+expandable=true
 
 [kbindicator]
+alignment=Right
 type=kbindicator
 showLayout=true
 showCapslock=true
 showNumlock=false
 showScrolllock=false
+
+[signout]
+alignment=Right
+type=quicklaunch
+apps\\1\\desktop=$SIGNOUT_LAUNCHER_PATH
+apps\\size=1
 EOF
-then
+}
+
+PANEL_NEEDS_RELOAD=0
+if write_panel_conf; then
+  PANEL_NEEDS_RELOAD=1
   echo "[on-connect] Applied LXQt panel.conf for '$USERNAME'"
 fi
 
 # 3. Copy wallpaper.jpg into user's home directory & configure PCManFM-Qt (both lxqt and default profiles!)
 USER_WALLPAPER_DIR="$HOMEDIR/.local/share/backgrounds"
 USER_WALLPAPER="$USER_WALLPAPER_DIR/wallpaper.jpg"
-ensure_user_dir "$HOMEDIR/.local"
-ensure_user_dir "$HOMEDIR/.local/share"
 ensure_user_dir "$USER_WALLPAPER_DIR"
 rm -f -- "$USER_WALLPAPER_DIR/wallpaper.png"
 
@@ -612,10 +670,8 @@ EOF
 
 # 5. Populate Desktop shortcuts (~/Desktop) & Plank launchers (dock1/launchers)
 DESKTOP_DIR="$HOMEDIR/Desktop"
-USER_APPS_DIR="$HOMEDIR/.local/share/applications"
 PLANK_LAUNCHERS_DIR="$HOMEDIR/.config/plank/dock1/launchers"
 ensure_user_dir "$DESKTOP_DIR"
-ensure_user_dir "$USER_APPS_DIR"
 ensure_user_dir "$HOMEDIR/.config/plank"
 ensure_user_dir "$HOMEDIR/.config/plank/dock1"
 ensure_user_dir "$PLANK_LAUNCHERS_DIR"
@@ -724,7 +780,14 @@ if [[ "${ON_CONNECT_SKIP_PROCESS_CHECK:-0}" != "1" ]] && command -v pgrep >/dev/
     done <"/proc/$LXQT_PID/environ" || true
 
     if [[ -n "$SAVED_DISPLAY" ]]; then
-      ENV_ARGS=("DISPLAY=$SAVED_DISPLAY" "HOME=$HOMEDIR" "USER=$USERNAME" "LOGNAME=$USERNAME")
+      ENV_ARGS=(
+        "DISPLAY=$SAVED_DISPLAY"
+        "HOME=$HOMEDIR"
+        "USER=$USERNAME"
+        "LOGNAME=$USERNAME"
+        "XDG_CURRENT_DESKTOP=LXQt"
+        "XDG_MENU_PREFIX=lxqt-"
+      )
       [[ -n "$SAVED_XAUTH" ]] && ENV_ARGS+=("XAUTHORITY=$SAVED_XAUTH")
       [[ -n "$SAVED_XDG_RUNTIME" ]] && ENV_ARGS+=("XDG_RUNTIME_DIR=$SAVED_XDG_RUNTIME")
       [[ -n "$SAVED_DBUS" ]] && ENV_ARGS+=("DBUS_SESSION_BUS_ADDRESS=$SAVED_DBUS")
@@ -736,6 +799,14 @@ if [[ "${ON_CONNECT_SKIP_PROCESS_CHECK:-0}" != "1" ]] && command -v pgrep >/dev/
           env "${ENV_ARGS[@]}" "$@"
         fi
       }
+
+      # If panel.conf changed while lxqt-panel is running, stop lxqt-panel first (so it doesn't
+      # overwrite panel.conf on exit), re-apply panel.conf, and let apigee-session-init restart it!
+      if [[ "$PANEL_NEEDS_RELOAD" -eq 1 ]] && pgrep -u "$USER_UID" -x lxqt-panel >/dev/null 2>&1; then
+        pkill -u "$USER_UID" -x lxqt-panel 2>/dev/null || true
+        sleep 0.2
+        write_panel_conf || true
+      fi
 
       # If PCManFM-Qt settings (QuickExec=true or WallpaperMode=zoom) changed while running,
       # restart pcmanfm-qt --desktop so its in-memory Launcher reloads QuickExec=true!
