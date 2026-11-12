@@ -28,6 +28,7 @@ const MIME_TYPES: Record<string, string> = {
   ".mjs": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".wasm": "application/wasm",
+  ".png": "image/png",
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
 };
@@ -399,7 +400,7 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
 }
 
 if (import.meta.main) {
-  const { server, config } = createAppServer();
+  const { server, config, vmUsers } = createAppServer();
   console.log(
     `[Apigee AI Demos] Listening on http://${server.hostname}:${server.port} | xrdp=${config.rdpHost}:${config.rdpPort} | vmUserMode=${config.vmUserMode}${
       config.vmUserMode === "mock"
@@ -407,4 +408,6 @@ if (import.meta.main) {
         : ""
     }`
   );
+  // Provision/update shared VM desktop apps once at server startup for all users
+  void vmUsers.ensureSystemTools();
 }

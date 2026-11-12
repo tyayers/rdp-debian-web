@@ -68,12 +68,13 @@ sudo "$(which bun)" run start
 
 *(For local UI testing without Google OAuth or real Linux users: `ALLOW_DEV_AUTH=true VM_USER_MODE=mock bun run dev`)*
 
-## Per-Connect Desktop Enforcement (`scripts/on-connect.sh`)
+## VM Tool Bootstrap & Per-Connect Desktop Enforcement (`scripts/on-connect.sh`)
 
-Every time a user connects to RDP, the server runs `./scripts/on-connect.sh <username> <homedir>` (configurable via `ON_CONNECT_SCRIPT` in `.env`, streaming live progress to the browser while running) before opening the `xrdp` session. By default, it:
-1. Ensures **Plank**, **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), and the **current latest releases** of **Antigravity CLI** (`agy`) and **Antigravity IDE** (`antigravity-ide`) are installed on the Debian 13 VM.
-2. Enforces the top **LXQt** panel layout (`~/.config/lxqt/panel.conf`) and configures **Plank** in `~/.config/autostart/plank.desktop`.
-3. Places launchers for **Google Chrome**, **VSCodium**, **Antigravity IDE**, and **Antigravity CLI** on both `~/Desktop` and the **Plank** dock (`~/.config/plank/dock1/launchers/`).
+- **Installed once system-wide for everyone (`--system-only`)**: On startup (when run via `sudo ./apigee-ai-demos`), the server ensures **Plank**, **QTerminal**, **PCManFM-Qt** (file manager), **FeatherPad** (text editor), **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), and the **current latest releases** of **Antigravity CLI** (`/usr/local/bin/agy`) and **Antigravity IDE** (`/opt/antigravity-ide`) are installed once at the OS level for all users.
+- **Applied per user on connect (`./scripts/on-connect.sh <username> <homedir>`)**:
+  1. Enforces the top **LXQt** panel layout (`~/.config/lxqt/panel.conf`) and configures **Plank** in `~/.config/autostart/plank.desktop`.
+  2. Copies `public/wallpaper.png` into `~/.local/share/backgrounds/wallpaper.png` and sets it as the LXQt desktop background (`~/.config/pcmanfm-qt/lxqt/settings.conf`).
+  3. Places shortcuts on `~/Desktop` (**Terminal**, **Google Chrome**, **VSCodium**, **Antigravity IDE**, **Antigravity CLI**) and pins launchers on the **Plank** dock (**File Manager**, **Terminal**, **Text Editor**, **Google Chrome**, **VSCodium**, **Antigravity IDE**, **Antigravity CLI**).
 
 ## Troubleshooting Black Screen / Immediate Disconnect
 

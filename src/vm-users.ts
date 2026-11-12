@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "./config.ts";
 import { POSIX_USERNAME_RE, RESERVED_USERNAMES } from "./auth.ts";
-import { EMBEDDED_ON_CONNECT_SCRIPT } from "./embedded-assets.ts";
+import { EMBEDDED_ON_CONNECT_SCRIPT, EMBEDDED_WALLPAPER_PNG } from "./embedded-assets.ts";
 
 export interface VmUserStatus {
   username: string;
@@ -310,6 +310,85 @@ export class VmUserManager {
     });
   }
 
+  private async resolveOnConnectAssets(): Promise<{ scriptPath: string; wallpaperPath: string }> {
+    let scriptPath = this.config.onConnectScript!;
+    if (!(await Bun.file(scriptPath).exists())) {
+      await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
+      const fallbackPath = path.join(this.config.dataDir, "on-connect.default.sh");
+      const embeddedText = await Bun.file(EMBEDDED_ON_CONNECT_SCRIPT).text();
+      await fs.writeFile(fallbackPath, embeddedText, { mode: 0o755 });
+      scriptPath = fallbackPath;
+    }
+
+    let wallpaperPath = path.join(this.config.publicDir, "wallpaper.png");
+    if (!(await Bun.file(wallpaperPath).exists())) {
+      await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o755 });
+      const fallbackWallpaper = path.join(this.config.dataDir, "wallpaper.png");
+      const bytes = await Bun.file(EMBEDDED_WALLPAPER_PNG).arrayBuffer();
+      await fs.writeFile(fallbackWallpaper, Buffer.from(bytes), { mode: 0o644 });
+      wallpaperPath = fallbackWallpaper;
+    }
+
+    return { scriptPath, wallpaperPath };
+  }
+
+  /**
+   * Installs/updates shared system-wide desktop tools (Plank, QTerminal, PCManFM-Qt, FeatherPad,
+   * VSCodium, Google Chrome, Antigravity CLI & IDE) once on server startup for all VM users.
+   */
+  async ensureSystemTools(): Promise<void> {
+    if (!this.config.onConnectScript || this.config.vmUserMode === "mock") {
+      return;
+    }
+
+    const { scriptPath, wallpaperPath } = await this.resolveOnConnectAssets();
+    const argv = [
+      ...(this.config.useSudo ? ["sudo", "-n"] : []),
+      "/bin/bash",
+      scriptPath,
+      "--system-only",
+    ];
+
+    const proc = Bun.spawn(argv, {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, ON_CONNECT_WALLPAPER_SRC: wallpaperPath },
+    });
+
+    const streamStdout = async () => {
+      if (!proc.stdout) return;
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nlIdx: number;
+        while ((nlIdx = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, nlIdx).trim();
+          buf = buf.slice(nlIdx + 1);
+          if (line) console.log(`${new Date().toISOString()} [bootstrap] ${line}`);
+        }
+      }
+      const tail = buf.trim();
+      if (tail) console.log(`${new Date().toISOString()} [bootstrap] ${tail}`);
+    };
+
+    const [exitCode, , stderr] = await Promise.all([
+      proc.exited,
+      streamStdout(),
+      new Response(proc.stderr).text(),
+    ]);
+
+    if (exitCode !== 0) {
+      console.warn(
+        `${new Date().toISOString()} [bootstrap] System tool check exited with code ${exitCode}: ${stderr.trim()}`
+      );
+    }
+  }
+
   async runOnConnectHook(
     username: string,
     options?: {
@@ -336,14 +415,7 @@ export class VmUserManager {
       homeDir = sys.homeDir;
     }
 
-    let scriptPath = this.config.onConnectScript;
-    if (!(await Bun.file(scriptPath).exists())) {
-      await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
-      const fallbackPath = path.join(this.config.dataDir, "on-connect.default.sh");
-      const embeddedText = await Bun.file(EMBEDDED_ON_CONNECT_SCRIPT).text();
-      await fs.writeFile(fallbackPath, embeddedText, { mode: 0o755 });
-      scriptPath = fallbackPath;
-    }
+    const { scriptPath, wallpaperPath } = await this.resolveOnConnectAssets();
 
     const useSudo = this.config.useSudo && !options?.homeDirOverride;
     const argv = [...(useSudo ? ["sudo", "-n"] : []), "/bin/bash", scriptPath, username, homeDir];
@@ -352,7 +424,11 @@ export class VmUserManager {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      env: options?.envOverrides ? { ...process.env, ...options.envOverrides } : process.env,
+      env: {
+        ...process.env,
+        ON_CONNECT_WALLPAPER_SRC: wallpaperPath,
+        ...(options?.envOverrides ?? {}),
+      },
     });
 
     // Stream stdout line-by-line so first-time package installs emit live progress to the UI
