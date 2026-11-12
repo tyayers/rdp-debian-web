@@ -70,7 +70,10 @@ sudo "$(which bun)" run start
 
 ## Per-Connect Desktop Enforcement (`scripts/on-connect.sh`)
 
-Every time a user connects to RDP, the server runs `./scripts/on-connect.sh <username> <homedir>` (configurable via `ON_CONNECT_SCRIPT` in `.env`) before opening the `xrdp` session. By default, it enforces **Terminal** and **Firefox** in the **LXQt** default panel Quick Launch favorites (`~/.config/lxqt/panel.conf`). Add additional per-connect policies at the bottom of `scripts/on-connect.sh`.
+Every time a user connects to RDP, the server runs `./scripts/on-connect.sh <username> <homedir>` (configurable via `ON_CONNECT_SCRIPT` in `.env`, streaming live progress to the browser while running) before opening the `xrdp` session. By default, it:
+1. Ensures **Plank**, **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), and the **current latest releases** of **Antigravity CLI** (`agy`) and **Antigravity IDE** (`antigravity-ide`) are installed on the Debian 13 VM.
+2. Enforces the top **LXQt** panel layout (`~/.config/lxqt/panel.conf`) and configures **Plank** in `~/.config/autostart/plank.desktop`.
+3. Places launchers for **Google Chrome**, **VSCodium**, **Antigravity IDE**, and **Antigravity CLI** on both `~/Desktop` and the **Plank** dock (`~/.config/plank/dock1/launchers/`).
 
 ## Troubleshooting Black Screen / Immediate Disconnect
 

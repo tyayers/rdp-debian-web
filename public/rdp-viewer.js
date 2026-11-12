@@ -343,6 +343,14 @@ export class RdpViewer {
       const kind = bytes[0];
       const payload = bytes.subarray(1);
 
+      if (kind === 0xfd) {
+        const statusMsg = textDecoder.decode(payload);
+        if (statusMsg) {
+          this.onStatus("connecting", statusMsg);
+        }
+        return;
+      }
+
       if (kind === 0xff) {
         const msg = textDecoder.decode(payload);
         this.connected = false;

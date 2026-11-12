@@ -365,34 +365,17 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
     expect(ascii).toContain("drdynvc");
   });
 
-  test("on-connect.sh enforces LXQt Quick Launch favorites (Terminal + Firefox) idempotently and supports embedded fallback", async () => {
+  test("on-connect.sh applies LXQt panel, Plank autostart, and Desktop + Plank icons for Chrome, Codium, Antigravity IDE & CLI", async () => {
     const mockAppsDir = path.join(tmpDir, "applications");
     await fs.mkdir(mockAppsDir, { recursive: true });
-    await fs.writeFile(path.join(mockAppsDir, "pcmanfm-qt.desktop"), "[Desktop Entry]\nName=Files\n");
-    await fs.writeFile(path.join(mockAppsDir, "qterminal.desktop"), "[Desktop Entry]\nName=QTerminal\n");
-    await fs.writeFile(path.join(mockAppsDir, "firefox-esr.desktop"), "[Desktop Entry]\nName=Firefox ESR\n");
-    await fs.writeFile(path.join(mockAppsDir, "firefox.desktop"), "[Desktop Entry]\nName=Firefox\n");
-
-    const sysPanelTemplate = path.join(tmpDir, "system-panel.conf");
-    await fs.writeFile(
-      sysPanelTemplate,
-      [
-        "[General]",
-        "panels=panel1",
-        "",
-        "[panel1]",
-        "plugins=mainmenu, desktopswitch, quicklaunch, taskbar, tray, worldclock",
-        "position=Bottom",
-        "",
-        "[quicklaunch]",
-        "alignment=Left",
-        "type=quicklaunch",
-        "",
-        "[taskbar]",
-        "type=taskbar",
-        "",
-      ].join("\n")
-    );
+    for (const app of [
+      "google-chrome.desktop",
+      "codium.desktop",
+      "antigravity-ide.desktop",
+      "antigravity-cli.desktop",
+    ]) {
+      await fs.writeFile(path.join(mockAppsDir, app), `[Desktop Entry]\nType=Application\nName=${app}\n`);
+    }
 
     const cfg = loadConfig({
       SESSION_SECRET: "test-secret",
@@ -404,54 +387,64 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
     });
     const mgr = new VmUserManager(cfg);
 
-    // 1. Fresh user home seeded from Debian system template
     const freshHome = path.join(tmpDir, "home-alice");
+    const progressMessages: string[] = [];
     const envOverrides = {
       ON_CONNECT_APPS_DIR: mockAppsDir,
-      ON_CONNECT_SYSTEM_PANEL_CONF: sysPanelTemplate,
+      ON_CONNECT_SKIP_INSTALL: "1",
       ON_CONNECT_SKIP_PROCESS_CHECK: "1",
     };
+    await mgr.runOnConnectHook("alice", {
+      homeDirOverride: freshHome,
+      envOverrides,
+      onProgress: (msg) => progressMessages.push(msg),
+    });
 
-    await mgr.runOnConnectHook("alice", { homeDirOverride: freshHome, envOverrides });
+    expect(progressMessages.length).toBeGreaterThan(0);
+
     const panelConfPath = path.join(freshHome, ".config", "lxqt", "panel.conf");
+    const plankAutostartPath = path.join(freshHome, ".config", "autostart", "plank.desktop");
+    const pcmanfmConfPath = path.join(freshHome, ".config", "pcmanfm-qt", "lxqt", "settings.conf");
     const firstPass = await fs.readFile(panelConfPath, "utf8");
+    const plankDesktop = await fs.readFile(plankAutostartPath, "utf8");
+    const pcmanfmConf = await fs.readFile(pcmanfmConfPath, "utf8");
 
-    expect(firstPass).toContain("__userfile__=true");
-    expect(firstPass).toContain(`apps\\1\\desktop=${path.join(mockAppsDir, "pcmanfm-qt.desktop")}`);
-    expect(firstPass).toContain(`apps\\2\\desktop=${path.join(mockAppsDir, "qterminal.desktop")}`);
-    expect(firstPass).toContain(`apps\\3\\desktop=${path.join(mockAppsDir, "firefox-esr.desktop")}`);
-    expect(firstPass).toContain("apps\\size=3");
-    expect(firstPass).toContain("[taskbar]");
+    expect(firstPass).toContain("[General]\n__userfile__=true\npanels=panel1");
+    expect(firstPass).toContain("position=Top");
+    expect(firstPass).toContain("plugins=mainmenu, taskbar, spacer, kbindicator");
+    expect(plankDesktop).toContain("Exec=plank");
+    expect(pcmanfmConf).toContain("QuickExec=true");
 
-    // 2. Second connect is completely idempotent
+    // Verify all 4 Desktop shortcuts exist and are executable (0755)
+    for (const app of [
+      "google-chrome.desktop",
+      "codium.desktop",
+      "antigravity-ide.desktop",
+      "antigravity-cli.desktop",
+    ]) {
+      const desktopShortcut = path.join(freshHome, "Desktop", app);
+      const stat = await fs.stat(desktopShortcut);
+      expect(stat.mode & 0o111).toBeGreaterThan(0);
+    }
+
+    // Verify all 4 Plank dockitems exist in ordered sequence
+    const plankDir = path.join(freshHome, ".config", "plank", "dock1", "launchers");
+    const expectedDockItems = [
+      ["01-google-chrome.dockitem", "google-chrome.desktop"],
+      ["02-codium.dockitem", "codium.desktop"],
+      ["03-antigravity-ide.dockitem", "antigravity-ide.desktop"],
+      ["04-antigravity-cli.dockitem", "antigravity-cli.desktop"],
+    ] as const;
+
+    for (const [dockFile, desktopFile] of expectedDockItems) {
+      const content = await fs.readFile(path.join(plankDir, dockFile), "utf8");
+      expect(content).toContain("[PlankItemsDockItemPreferences]");
+      expect(content).toContain(`Launcher=file://${path.join(mockAppsDir, desktopFile)}`);
+    }
+
+    // Second connect is idempotent
     await mgr.runOnConnectHook("alice", { homeDirOverride: freshHome, envOverrides });
     const secondPass = await fs.readFile(panelConfPath, "utf8");
     expect(secondPass).toBe(firstPass);
-
-    // 3. Existing customized panel.conf preserves user apps and avoids duplicate firefox entries
-    const customHome = path.join(tmpDir, "home-bob");
-    const bobLxqtDir = path.join(customHome, ".config", "lxqt");
-    await fs.mkdir(bobLxqtDir, { recursive: true });
-    await fs.writeFile(
-      path.join(bobLxqtDir, "panel.conf"),
-      [
-        "[panel1]",
-        "plugins=mainmenu, taskbar",
-        "",
-        "[quicklaunch]",
-        `apps\\1\\desktop=${path.join(mockAppsDir, "firefox.desktop")}`,
-        "apps\\size=1",
-        "",
-      ].join("\n")
-    );
-
-    await mgr.runOnConnectHook("bob", { homeDirOverride: customHome, envOverrides });
-    const bobConf = await fs.readFile(path.join(bobLxqtDir, "panel.conf"), "utf8");
-    expect(bobConf).toContain("[General]\n__userfile__=true");
-    expect(bobConf).toContain("plugins=mainmenu, taskbar, quicklaunch");
-    expect(bobConf).toContain(`apps\\1\\desktop=${path.join(mockAppsDir, "firefox.desktop")}`);
-    expect(bobConf).toContain(`apps\\2\\desktop=${path.join(mockAppsDir, "qterminal.desktop")}`);
-    expect(bobConf).not.toContain("firefox-esr.desktop");
-    expect(bobConf).toContain("apps\\size=2");
   });
 });

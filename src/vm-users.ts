@@ -312,7 +312,11 @@ export class VmUserManager {
 
   async runOnConnectHook(
     username: string,
-    options?: { homeDirOverride?: string; envOverrides?: Record<string, string> }
+    options?: {
+      homeDirOverride?: string;
+      envOverrides?: Record<string, string>;
+      onProgress?: (statusText: string) => void;
+    }
   ): Promise<void> {
     assertSafeUsername(username);
     if (!this.config.onConnectScript) {
@@ -351,21 +355,46 @@ export class VmUserManager {
       env: options?.envOverrides ? { ...process.env, ...options.envOverrides } : process.env,
     });
 
-    const [exitCode, stdout, stderr] = await Promise.all([
+    // Stream stdout line-by-line so first-time package installs emit live progress to the UI
+    const streamStdout = async () => {
+      if (!proc.stdout) return;
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nlIdx: number;
+        while ((nlIdx = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, nlIdx).trim();
+          buf = buf.slice(nlIdx + 1);
+          if (!line) continue;
+          console.log(`${new Date().toISOString()} ${line}`);
+          if (line.startsWith("[status]") && options?.onProgress) {
+            options.onProgress(line.slice("[status]".length).trim());
+          }
+        }
+      }
+      const tail = buf.trim();
+      if (tail) {
+        console.log(`${new Date().toISOString()} ${tail}`);
+        if (tail.startsWith("[status]") && options?.onProgress) {
+          options.onProgress(tail.slice("[status]".length).trim());
+        }
+      }
+    };
+
+    const [exitCode, , stderr] = await Promise.all([
       proc.exited,
-      new Response(proc.stdout).text(),
+      streamStdout(),
       new Response(proc.stderr).text(),
     ]);
-
-    const nowIso = new Date().toISOString();
-    for (const line of stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
-      console.log(`${nowIso} ${line}`);
-    }
 
     if (exitCode !== 0) {
       const detail = stderr.trim() || `exit code ${exitCode}`;
       console.warn(
-        `${nowIso} [on-connect] Enforcement script '${scriptPath}' exited with error for '${username}': ${detail}`
+        `${new Date().toISOString()} [on-connect] Enforcement script '${scriptPath}' exited with error for '${username}': ${detail}`
       );
       if (options?.homeDirOverride) {
         throw new Error(`on-connect script failed: ${detail}`);

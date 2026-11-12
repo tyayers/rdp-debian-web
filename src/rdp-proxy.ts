@@ -3,6 +3,7 @@ import tls from "node:tls";
 import type { ServerWebSocket } from "bun";
 import type { AppConfig } from "./config.ts";
 import type { SessionUser } from "./auth.ts";
+import type { VmUserManager } from "./vm-users.ts";
 
 /**
  * Binary WebSocket framing between browser IronRDP WASM and Bun xrdp proxy:
@@ -13,11 +14,13 @@ import type { SessionUser } from "./auth.ts";
  *   Server -> Client:
  *     [0x02, ...x224_connection_confirm]  (X.224 Connection Confirm after TLS upgrade)
  *     [0x00, ...rdp_pdu_bytes]            (Post-TLS RDP stream bytes)
+ *     [0xFD, ...utf8_status_message]      (Live provisioning/status progress before xrdp handshake)
  *     [0xFF, ...utf8_error_message]       (Proxy connection/TLS failure message)
  */
 const FRAME_DATA = 0x00;
 const FRAME_X224_REQ = 0x01;
 const FRAME_X224_RSP = 0x02;
+const FRAME_STATUS = 0xfd;
 const FRAME_CLIENT_LOG = 0xfe;
 const FRAME_ERROR = 0xff;
 
@@ -31,7 +34,7 @@ export interface RdpWsContext {
   txBytes: number;
   rxBytes: number;
   user: SessionUser;
-  phase: "awaiting_x224" | "connecting" | "streaming" | "closed";
+  phase: "awaiting_x224" | "provisioning" | "connecting" | "streaming" | "closed";
   tcpSocket: net.Socket | null;
   tlsSocket: tls.TLSSocket | null;
   rdpHost: string;
@@ -140,10 +143,24 @@ function parseX224NegotiationConfirm(tpkt: Buffer): {
   return { isResponse: true, code: 0 };
 }
 
+function sendStatusFrame(ws: ServerWebSocket<RdpWsContext>, statusText: string): void {
+  if (ws.data.phase === "closed") return;
+  try {
+    const textBytes = Buffer.from(statusText, "utf8");
+    const frame = new Uint8Array(1 + textBytes.length);
+    frame[0] = FRAME_STATUS;
+    frame.set(textBytes, 1);
+    ws.sendBinary(frame);
+  } catch {
+    // Ignore send errors on closing socket
+  }
+}
+
 export function handleRdpWsMessage(
   ws: ServerWebSocket<RdpWsContext>,
   message: string | Buffer,
-  _config: AppConfig
+  _config: AppConfig,
+  vmUsers: VmUserManager
 ): void {
   if (typeof message === "string") {
     return;
@@ -172,8 +189,25 @@ export function handleRdpWsMessage(
       return;
     }
 
-    ws.data.phase = "connecting";
-    startBackendHandshake(ws, Buffer.from(payload));
+    const x224Copy = Buffer.from(payload);
+    ws.data.phase = "provisioning";
+
+    void (async () => {
+      try {
+        await vmUsers.runOnConnectHook(ws.data.user.username, {
+          onProgress: (statusText) => sendStatusFrame(ws, statusText),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        rdpLog(ws.data, `Warning: on-connect hook error: ${msg}`);
+      }
+
+      if (ws.data.phase !== "provisioning") {
+        return;
+      }
+      ws.data.phase = "connecting";
+      startBackendHandshake(ws, x224Copy);
+    })();
     return;
   }
 

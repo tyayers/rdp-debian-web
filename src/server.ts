@@ -168,16 +168,6 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
           return jsonResponse({ error: "Local VM account must be initialized first" }, 403);
         }
 
-        // Enforce desktop session configuration (e.g. LXQt panel favorites) before opening xrdp
-        try {
-          await vmUsers.runOnConnectHook(session.username);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(
-            `${new Date().toISOString()} [on-connect] Unexpected error running hook for '${session.username}': ${msg}`
-          );
-        }
-
         const wsCtx = createRdpWsContext(session, config);
         const upgraded = srv.upgrade(req, { data: wsCtx });
         if (upgraded) {
@@ -392,7 +382,7 @@ export function createAppServer(customConfig?: Partial<AppConfig>) {
       idleTimeout: 120,
       sendPings: true,
       message(ws, message) {
-        handleRdpWsMessage(ws, message, config);
+        handleRdpWsMessage(ws, message, config, vmUsers);
       },
       close(ws, code, reason) {
         const elapsed = Date.now() - ws.data.openedAt;
