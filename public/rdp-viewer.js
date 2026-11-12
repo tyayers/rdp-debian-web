@@ -234,6 +234,19 @@ export class RdpViewer {
     }
   }
 
+  sendResizeCompleted(width, height) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const bytes = textEncoder.encode(`${width}x${height}`);
+    const packet = new Uint8Array(1 + bytes.length);
+    packet[0] = 0xfc;
+    packet.set(bytes, 1);
+    try {
+      this.ws.send(packet);
+    } catch {
+      // Ignore
+    }
+  }
+
   async connect({ username, password }) {
     this.disconnect();
     this.destroyed = false;
@@ -281,6 +294,7 @@ export class RdpViewer {
           this.canvas.height = h;
         }
         this.onStatus("connected", `${w}×${h}`);
+        this.sendResizeCompleted(w, h);
       },
       // on_draw_rect(rgbaUint8Array, x, y, w, h)
       (pixels, x, y, w, h) => {
@@ -558,6 +572,9 @@ export class RdpViewer {
       `Manual display recalibration -> ${width}x${height} (viewport=${rectWidth}x${rectHeight}, window=${window.innerWidth}x${window.innerHeight})`
     );
     this.session.recalibrate(width, height);
+    if (width === this.canvas.width && height === this.canvas.height) {
+      this.sendResizeCompleted(width, height);
+    }
   }
 
   releaseAllInputs() {

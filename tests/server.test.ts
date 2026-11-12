@@ -49,6 +49,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
   let usersYamlPath = "";
   let executedCommands: Array<{ argv: string[]; stdin?: string }> = [];
   let terminatedEvents: Array<{ username: string; reason: "pre-connect" | "disconnect" }> = [];
+  let repositionedUsers: string[] = [];
   let simulatedCpu5m = 18.5;
   let mockRdpServer: net.Server;
   let mockRdpPort = 0;
@@ -122,6 +123,9 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       skipSystemOnConnect: true,
       onTerminateSession: async (username, reason) => {
         terminatedEvents.push({ username, reason });
+      },
+      onRepositionPlank: async (username) => {
+        repositionedUsers.push(username);
       },
       execCommand: async (argv, stdinText) => {
         executedCommands.push({ argv, stdin: stdinText });
@@ -502,6 +506,20 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
         .map((e) => e.reason)
     ).toEqual(["pre-connect", "pre-connect"]);
 
+    // Sending client resize-completed frames (0xFC) while streaming debounces & repositions Plank
+    const dimsBytes = new TextEncoder().encode("1440x900");
+    const resizeFrame = new Uint8Array(1 + dimsBytes.length);
+    resizeFrame[0] = 0xfc;
+    resizeFrame.set(dimsBytes, 1);
+    ws2.send(resizeFrame);
+    ws2.send(resizeFrame);
+
+    for (let i = 0; i < 30; i++) {
+      if (repositionedUsers.includes("tabuser")) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(repositionedUsers.filter((u) => u === "tabuser")).toEqual(["tabuser"]);
+
     // Now close Tab 2 -> forced sign-out runs immediately
     ws2.close();
     for (let i = 0; i < 30; i++) {
@@ -535,9 +553,14 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     ]) {
       await fs.writeFile(
         path.join(mockAppsDir, appFile),
-        `[Desktop Entry]\nType=Application\nName=Title ${appFile}\nIcon=icon-${appFile}\n[Desktop Action extra]\nName=Action Title\n`
+        `[Desktop Entry]\nType=Application\nName=Title ${appFile}\nExec=/usr/bin/${appFile.replace(".desktop", "")} %U\nIcon=icon-${appFile}\n[Desktop Action extra]\nName=Action Title\n`
       );
     }
+    // Also place Debian's codium-url-handler.desktop (which sorts ASCII-before codium.desktop)
+    await fs.writeFile(
+      path.join(mockAppsDir, "codium-url-handler.desktop"),
+      `[Desktop Entry]\nType=Application\nName=VSCodium - URL Handler\nNoDisplay=true\nExec=/usr/share/codium/codium --open-url %U\nIcon=vscodium\n`
+    );
 
     const cfg = loadConfig({
       SESSION_SECRET: "test-secret",
@@ -559,10 +582,16 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
 
     const plankDir = path.join(freshHome, ".config", "plank", "dock1", "launchers");
     const autostartDir = path.join(freshHome, ".config", "autostart");
+    const preExistingDesktopDir = path.join(freshHome, "Desktop");
     await fs.mkdir(plankDir, { recursive: true });
     await fs.mkdir(autostartDir, { recursive: true });
+    await fs.mkdir(preExistingDesktopDir, { recursive: true });
     await fs.writeFile(path.join(plankDir, "clock.dockitem"), "[PlankItemsDockItemPreferences]\n");
     await fs.writeFile(path.join(autostartDir, "lxqt-panel.desktop"), "[Desktop Entry]\nHidden=true\n");
+    await fs.writeFile(
+      path.join(preExistingDesktopDir, "codium-url-handler.desktop"),
+      "[Desktop Entry]\nType=Link\nName=VSCodium - URL Handler\n"
+    );
 
     await mgr.runOnConnectHook("alice", {
       homeDirOverride: freshHome,
@@ -597,22 +626,28 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     expect(pcmanfmConf).toContain("QuickExec=true");
     expect(pcmanfmConf).toContain("WallpaperMode=zoom");
 
-    for (const desktopShortcut of [
-      "qterminal.desktop",
-      "google-chrome.desktop",
-      "codium.desktop",
-      "antigravity.desktop",
-    ]) {
+    const expectedDesktopTitles: Record<string, string> = {
+      "qterminal.desktop": "Title qterminal.desktop",
+      "google-chrome.desktop": "Title google-chrome.desktop",
+      "codium.desktop": "VSCodium",
+      "antigravity.desktop": "Antigravity",
+    };
+
+    for (const [desktopShortcut, expectedTitle] of Object.entries(expectedDesktopTitles)) {
       const shortcutText = await fs.readFile(
         path.join(freshHome, "Desktop", desktopShortcut),
         "utf8"
       );
       expect(shortcutText).toContain("Type=Link");
-      expect(shortcutText).toContain(`Name=Title ${desktopShortcut}`);
+      expect(shortcutText).toContain(`Name=${expectedTitle}`);
+      expect(shortcutText).not.toContain("URL Handler");
       expect(shortcutText).not.toContain("Action Title");
       expect(shortcutText).toContain(`Icon=icon-${desktopShortcut}`);
       expect(shortcutText).toContain(`URL=${path.join(mockAppsDir, desktopShortcut)}`);
     }
+    expect(
+      await Bun.file(path.join(freshHome, "Desktop", "codium-url-handler.desktop")).exists()
+    ).toBe(false);
 
     const expectedDockItems = [
       ["01-home.dockitem", "apigee-user-home.desktop"],
@@ -629,20 +664,30 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     }
     expect(await Bun.file(path.join(plankDir, "clock.dockitem")).exists()).toBe(false);
 
-    // Verify --signout invocation succeeds cleanly
-    const signoutProc = Bun.spawn(
-      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "--signout", "alice"],
-      {
-        env: { ...process.env, ON_CONNECT_SKIP_PROCESS_CHECK: "1" },
-        stdout: "pipe",
-        stderr: "pipe",
-      }
-    );
-    expect(await signoutProc.exited).toBe(0);
+    // Verify --signout and --reposition-plank invocations succeed cleanly
+    for (const flag of ["--signout", "--reposition-plank"] as const) {
+      const flagProc = Bun.spawn(
+        ["/bin/bash", path.resolve("scripts/on-connect.sh"), flag, "alice"],
+        {
+          env: { ...process.env, ON_CONNECT_SKIP_PROCESS_CHECK: "1" },
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+      expect(await flagProc.exited).toBe(0);
+    }
 
-    // Verify all 6 Plank dock items are STILL created deterministically even if system .desktop names differ/are absent
+    // Verify Exec= fallback scan skips codium-url-handler.desktop & NoDisplay=true and still names shortcut VSCodium
     const emptyAppsDir = path.join(tmpDir, "empty-applications");
     await fs.mkdir(emptyAppsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(emptyAppsDir, "codium-url-handler.desktop"),
+      `[Desktop Entry]\nType=Application\nName=VSCodium - URL Handler\nNoDisplay=true\nExec=/usr/share/codium/codium --open-url %U\nIcon=vscodium\n`
+    );
+    await fs.writeFile(
+      path.join(emptyAppsDir, "zzz-custom-codium.desktop"),
+      `[Desktop Entry]\nType=Application\nName=VSCodium - Insiders\nExec=/usr/share/codium/codium %F\nIcon=vscodium\n`
+    );
     const fallbackHome = path.join(tmpDir, "home-bob");
     await mgr.runOnConnectHook("bob", {
       homeDirOverride: fallbackHome,
@@ -656,6 +701,15 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     for (const [dockFile] of expectedDockItems) {
       expect(await Bun.file(path.join(bobPlankDir, dockFile)).exists()).toBe(true);
     }
+    const bobCodiumDock = await fs.readFile(path.join(bobPlankDir, "03-codium.dockitem"), "utf8");
+    expect(bobCodiumDock).toContain("zzz-custom-codium.desktop");
+    expect(bobCodiumDock).not.toContain("codium-url-handler.desktop");
+    const bobCodiumDesktop = await fs.readFile(
+      path.join(fallbackHome, "Desktop", "codium.desktop"),
+      "utf8"
+    );
+    expect(bobCodiumDesktop).toContain("Name=VSCodium\n");
+    expect(bobCodiumDesktop).toContain(`URL=${path.join(emptyAppsDir, "zzz-custom-codium.desktop")}`);
   });
 
   test("serves continuous host VM CPU/memory telemetry and refuses connections when 5m average CPU >= 70%", async () => {

@@ -8,6 +8,8 @@
 #        ./scripts/on-connect.sh <username> [homedir]
 #   3) Force sign-out of a user's xrdp/LXQt desktop session (run on browser disconnect):
 #        ./scripts/on-connect.sh --signout <username>
+#   4) Restart/reposition Plank dock after dynamic display resize:
+#        ./scripts/on-connect.sh --reposition-plank <username>
 
 set -euo pipefail
 
@@ -49,15 +51,22 @@ resolve_or_create_desktop() {
   done
 
   # Search installed .desktop files by Exec= binary name in case package renamed its .desktop ID
+  # (skipping *-url-handler*.desktop and NoDisplay=true helper entries!)
   local bin_name="${fallback_exec%% *}"
   bin_name="${bin_name##*/}"
   if [[ -n "$bin_name" && -d "$APPS_DIR" ]]; then
     local matched
-    matched="$(grep -lE "^Exec=([^[:space:]]*/)?${bin_name}([[:space:]]|\$)" "$APPS_DIR"/*.desktop 2>/dev/null | head -n1 || true)"
-    if [[ -n "$matched" && -f "$matched" ]]; then
+    while read -r matched; do
+      [[ -z "$matched" || ! -f "$matched" ]] && continue
+      case "$(basename -- "$matched")" in
+        *url-handler*) continue ;;
+      esac
+      if grep -qE '^NoDisplay=[[:space:]]*true([[:space:]]|$)' "$matched" 2>/dev/null; then
+        continue
+      fi
       printf '%s' "$matched"
       return 0
-    fi
+    done < <(grep -lE "^Exec=([^[:space:]]*/)?${bin_name}([[:space:]]|\$)" "$APPS_DIR"/*.desktop 2>/dev/null || true)
   fi
 
   # Guaranteed fallback .desktop in user applications dir so Plank never drops an icon
@@ -434,10 +443,11 @@ if command -v dconf >/dev/null 2>&1; then
 fi
 
 # 3. Pre-start bamfdaemon directly on the live X11 DISPLAY so libbamf3 never blocks on systemd D-Bus activation
+#    Close FD 8 in child so bamfdaemon never holds the Plank flock after Plank restarts on resize!
 if ! pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1; then
   for bamf_bin in /usr/libexec/bamf/bamfdaemon /usr/lib/*/bamf/bamfdaemon; do
     if [[ -x "$bamf_bin" ]]; then
-      nohup "$bamf_bin" </dev/null >/dev/null 2>&1 &
+      nohup "$bamf_bin" </dev/null >/dev/null 2>&1 8>&- &
       sleep 0.15
       break
     fi
@@ -724,6 +734,95 @@ terminate_user_xrdp_session() {
   echo "[on-connect] Signed out xrdp desktop session for '$target_user'"
 }
 
+reposition_user_plank() {
+  local target_user="$1"
+  if [[ "${ON_CONNECT_SKIP_PROCESS_CHECK:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  local target_uid target_gid target_home
+  target_uid="$(id -u -- "$target_user" 2>/dev/null || true)"
+  target_gid="$(id -g -- "$target_user" 2>/dev/null || true)"
+  if [[ -z "$target_uid" || "$target_uid" -lt 1000 || -z "$target_gid" ]]; then
+    return 0
+  fi
+  if [[ "$(id -u)" -ne 0 && "$(id -un)" != "$target_user" ]]; then
+    return 0
+  fi
+  target_home="$(getent passwd -- "$target_user" | cut -d: -f6 || true)"
+  target_home="${target_home:-/home/$target_user}"
+
+  command -v pgrep >/dev/null 2>&1 || return 0
+  local sess_pid="" proc_name
+  for proc_name in lxqt-session lxqt-panel openbox pcmanfm-qt; do
+    sess_pid="$(pgrep -u "$target_uid" -x "$proc_name" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$sess_pid" && -r "/proc/$sess_pid/environ" ]]; then
+      break
+    fi
+    sess_pid=""
+  done
+  [[ -z "$sess_pid" ]] && return 0
+
+  local saved_display="" saved_xauth="" saved_xdg_runtime="" saved_dbus="" k v
+  while IFS='=' read -r -d '' k v; do
+    case "$k" in
+      DISPLAY) saved_display="$v" ;;
+      XAUTHORITY) saved_xauth="$v" ;;
+      XDG_RUNTIME_DIR) saved_xdg_runtime="$v" ;;
+      DBUS_SESSION_BUS_ADDRESS) saved_dbus="$v" ;;
+    esac
+  done <"/proc/$sess_pid/environ" || true
+
+  [[ -z "$saved_display" ]] && return 0
+
+  # Allow X11 / window manager RandR geometry update to settle before restarting Plank
+  sleep 0.15
+
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -TERM -u "$target_uid" -x plank 2>/dev/null || true
+    local attempt
+    for ((attempt = 1; attempt <= 15; attempt++)); do
+      pgrep -u "$target_uid" -x plank >/dev/null 2>&1 || break
+      sleep 0.05
+    done
+    if pgrep -u "$target_uid" -x plank >/dev/null 2>&1; then
+      pkill -KILL -u "$target_uid" -x plank 2>/dev/null || true
+      sleep 0.05
+    fi
+  fi
+
+  rm -f -- "${saved_xdg_runtime:-/tmp}/apigee-plank-${target_uid}.lock" 2>/dev/null || true
+
+  local env_args=(
+    "DISPLAY=$saved_display"
+    "HOME=$target_home"
+    "USER=$target_user"
+    "LOGNAME=$target_user"
+    "XDG_CURRENT_DESKTOP=LXQt"
+    "XDG_MENU_PREFIX=lxqt-"
+    "XDG_SESSION_TYPE=x11"
+  )
+  [[ -n "$saved_xauth" ]] && env_args+=("XAUTHORITY=$saved_xauth")
+  [[ -n "$saved_xdg_runtime" ]] && env_args+=("XDG_RUNTIME_DIR=$saved_xdg_runtime")
+  [[ -n "$saved_dbus" ]] && env_args+=("DBUS_SESSION_BUS_ADDRESS=$saved_dbus")
+
+  local start_cmd=("/usr/local/bin/apigee-start-plank")
+  if [[ ! -x "/usr/local/bin/apigee-start-plank" ]]; then
+    start_cmd=("env" "NO_AT_BRIDGE=1" "GTK_USE_PORTAL=0" "GDK_DEBUG=no-portals" "GIO_USE_PORTALS=0" "plank")
+  fi
+
+  if [[ "$(id -u)" -eq 0 ]] && command -v setpriv >/dev/null 2>&1; then
+    setpriv --reuid="$target_uid" --regid="$target_gid" --init-groups \
+      env "${env_args[@]}" sh -c 'nohup "$@" </dev/null >/dev/null 2>&1 &' _ "${start_cmd[@]}"
+  elif [[ "$(id -u)" -eq 0 ]] && [[ -x /usr/sbin/runuser ]]; then
+    /usr/sbin/runuser -u "$target_user" -- \
+      env "${env_args[@]}" sh -c 'nohup "$@" </dev/null >/dev/null 2>&1 &' _ "${start_cmd[@]}"
+  elif [[ "$(id -u)" -eq "$target_uid" ]]; then
+    env "${env_args[@]}" sh -c 'nohup "$@" </dev/null >/dev/null 2>&1 &' _ "${start_cmd[@]}"
+  fi
+  echo "[on-connect] Repositioned Plank dock for '$target_user' on $saved_display"
+}
+
 if [[ "${1:-}" == "--system-only" ]]; then
   run_serialized_system_install
   echo "[on-connect] System-wide tool bootstrap complete"
@@ -733,6 +832,12 @@ fi
 if [[ "${1:-}" == "--signout" ]]; then
   SIGNOUT_USER="${2:?Usage: on-connect.sh --signout <username>}"
   terminate_user_xrdp_session "$SIGNOUT_USER"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--reposition-plank" ]]; then
+  REPOS_USER="${2:?Usage: on-connect.sh --reposition-plank <username>}"
+  reposition_user_plank "$REPOS_USER"
   exit 0
 fi
 
@@ -1064,33 +1169,34 @@ EDITOR_DESKTOP_PATH="$(resolve_or_create_desktop "text-editor" "FeatherPad" "fea
 CHROME_DESKTOP_PATH="$(resolve_or_create_desktop "chrome" "Google Chrome" "google-chrome-stable %U" "google-chrome" \
   google-chrome.desktop google-chrome-stable.desktop chromium.desktop)"
 CODIUM_DESKTOP_PATH="$(resolve_or_create_desktop "codium" "VSCodium" "codium %F" "vscodium" \
-  codium.desktop)"
+  codium.desktop vscodium.desktop com.vscodium.codium.desktop)"
 ANTIGRAVITY_DESKTOP_PATH="$(resolve_or_create_desktop "antigravity" "Antigravity" "/opt/antigravity/antigravity %U" "antigravity" \
   antigravity.desktop)"
 
-# Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity (remove old IDE/CLI shortcuts).
+# Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity (remove old/url-handler shortcuts).
 # Written as Type=Link shortcuts targeting /usr/share/applications/*.desktop: in LXQt libfm-qt
 # (FileInfo::isExecutableType), Type=Link entries targeting /usr/share/* are inherently trusted on disk
 # without needing GVFS metadata, avoiding both the '!' untrusted emblem and symlink arrow emblem.
-rm -f -- "$DESKTOP_DIR/antigravity-ide.desktop" "$DESKTOP_DIR/antigravity-cli.desktop"
-DESKTOP_SHORTCUT_SOURCES=(
-  "$TERM_DESKTOP_PATH"
-  "$CHROME_DESKTOP_PATH"
-  "$CODIUM_DESKTOP_PATH"
-  "$ANTIGRAVITY_DESKTOP_PATH"
-)
+rm -f -- \
+  "$DESKTOP_DIR/antigravity-ide.desktop" \
+  "$DESKTOP_DIR/antigravity-cli.desktop" \
+  "$DESKTOP_DIR"/*url-handler*.desktop
 
 write_desktop_shortcut() {
   local src_desktop="$1"
   local dest_desktop="$2"
+  local override_name="${3:-}"
   [[ ! -f "$src_desktop" ]] && return 0
 
   local entry_name entry_icon entry_comment
-  entry_name="$(awk '
-    /^\[Desktop Entry\][ \t]*$/ { in_de=1; next }
-    /^\[[^]]+\][ \t]*$/ { in_de=0 }
-    in_de && /^Name=/ { sub(/^Name=/, ""); print; exit }
-  ' "$src_desktop")"
+  entry_name="$override_name"
+  if [[ -z "$entry_name" ]]; then
+    entry_name="$(awk '
+      /^\[Desktop Entry\][ \t]*$/ { in_de=1; next }
+      /^\[[^]]+\][ \t]*$/ { in_de=0 }
+      in_de && /^Name=/ { sub(/^Name=/, ""); print; exit }
+    ' "$src_desktop")"
+  fi
   entry_icon="$(awk '
     /^\[Desktop Entry\][ \t]*$/ { in_de=1; next }
     /^\[[^]]+\][ \t]*$/ { in_de=0 }
@@ -1116,9 +1222,18 @@ write_desktop_shortcut() {
   } | write_user_file "$dest_desktop" 0644 || true
 }
 
-for src_desktop in "${DESKTOP_SHORTCUT_SOURCES[@]}"; do
-  [[ -z "$src_desktop" || ! -f "$src_desktop" ]] && continue
-  write_desktop_shortcut "$src_desktop" "$DESKTOP_DIR/$(basename -- "$src_desktop")"
+write_desktop_shortcut "$TERM_DESKTOP_PATH" "$DESKTOP_DIR/qterminal.desktop"
+write_desktop_shortcut "$CHROME_DESKTOP_PATH" "$DESKTOP_DIR/google-chrome.desktop"
+write_desktop_shortcut "$CODIUM_DESKTOP_PATH" "$DESKTOP_DIR/codium.desktop" "VSCodium"
+write_desktop_shortcut "$ANTIGRAVITY_DESKTOP_PATH" "$DESKTOP_DIR/antigravity.desktop" "Antigravity"
+
+# Remove any other stale .desktop shortcut names left in ~/Desktop from previous runs
+for existing_desk in "$DESKTOP_DIR"/*.desktop; do
+  [[ ! -e "$existing_desk" ]] && continue
+  case "$(basename -- "$existing_desk")" in
+    qterminal.desktop|google-chrome.desktop|codium.desktop|antigravity.desktop) ;;
+    *) rm -f -- "$existing_desk" ;;
+  esac
 done
 
 # Exact Plank dock items: Home, Chrome, VSCodium, Terminal, Text Editor, Antigravity

@@ -11,6 +11,7 @@ import type { VmUserManager } from "./vm-users.ts";
  *   Client -> Server:
  *     [0x01, ...x224_connection_request]  (Initial X.224 Connection Request PDU)
  *     [0x00, ...rdp_pdu_bytes]            (Post-TLS RDP stream bytes)
+ *     [0xFC, ...utf8_WxH]                 (Client display resize completed notification)
  *     [0xFE, ...utf8_diagnostic_log]      (Client WASM lifecycle/error log)
  *   Server -> Client:
  *     [0x02, ...x224_connection_confirm]  (X.224 Connection Confirm after TLS upgrade)
@@ -21,6 +22,7 @@ import type { VmUserManager } from "./vm-users.ts";
 const FRAME_DATA = 0x00;
 const FRAME_X224_REQ = 0x01;
 const FRAME_X224_RSP = 0x02;
+const FRAME_CLIENT_RESIZED = 0xfc;
 const FRAME_STATUS = 0xfd;
 const FRAME_CLIENT_LOG = 0xfe;
 const FRAME_ERROR = 0xff;
@@ -277,6 +279,15 @@ export function handleRdpWsMessage(
   if (kind === FRAME_CLIENT_LOG) {
     const logText = payload.subarray(0, 1024).toString("utf8");
     rdpLog(ws.data, `[client] ${logText}`);
+    return;
+  }
+
+  if (kind === FRAME_CLIENT_RESIZED) {
+    if (ws.data.phase === "streaming") {
+      const dims = payload.subarray(0, 64).toString("utf8").trim();
+      rdpLog(ws.data, `Display resized (${dims || "updated"}); repositioning Plank dock`);
+      vmUsers.scheduleRepositionDesktopDock(ws.data.user.username);
+    }
     return;
   }
 

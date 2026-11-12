@@ -37,6 +37,7 @@ export interface SystemUserAdapter {
   execCommand?: (argv: string[], stdinText?: string) => Promise<{ exitCode: number; stderr: string }>;
   skipSystemOnConnect?: boolean;
   onTerminateSession?: (username: string, reason: "pre-connect" | "disconnect") => Promise<void> | void;
+  onRepositionPlank?: (username: string) => Promise<void> | void;
 }
 
 const PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
@@ -184,6 +185,7 @@ function assertSafeUsername(username: string): void {
 export class VmUserManager {
   private writeLock: Promise<void> = Promise.resolve();
   private readonly userSessionLocks = new Map<string, Promise<void>>();
+  private readonly repositionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly syncedThisBoot = new Set<string>();
   private readonly passwdPath: string;
 
@@ -579,6 +581,11 @@ export class VmUserManager {
     reason: "pre-connect" | "disconnect" = "disconnect"
   ): Promise<void> {
     assertSafeUsername(username);
+    const pendingTimer = this.repositionTimers.get(username);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      this.repositionTimers.delete(username);
+    }
 
     if (this.adapter?.onTerminateSession) {
       await this.adapter.onTerminateSession(username, reason);
@@ -627,6 +634,82 @@ export class VmUserManager {
       const detail = stderr.trim() || `exit code ${exitCode}`;
       console.warn(
         `${new Date().toISOString()} [on-connect] Sign-out script exited with error for '${username}': ${detail}`
+      );
+    }
+  }
+
+  /**
+   * Debounces rapid display resize completions per user and restarts/repositions Plank
+   * so the dock re-anchors to the bottom of the new X11 RandR screen geometry.
+   */
+  scheduleRepositionDesktopDock(username: string, delayMs = 120): void {
+    assertSafeUsername(username);
+    const prev = this.repositionTimers.get(username);
+    if (prev) {
+      clearTimeout(prev);
+    }
+    const timer = setTimeout(() => {
+      this.repositionTimers.delete(username);
+      void this.repositionDesktopDock(username).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `${new Date().toISOString()} [on-connect] Failed repositioning Plank for '${username}': ${msg}`
+        );
+      });
+    }, delayMs);
+    this.repositionTimers.set(username, timer);
+  }
+
+  async repositionDesktopDock(username: string): Promise<void> {
+    assertSafeUsername(username);
+
+    if (this.adapter?.onRepositionPlank) {
+      await this.adapter.onRepositionPlank(username);
+    }
+    if (!this.config.onConnectScript || this.adapter?.skipSystemOnConnect) {
+      return;
+    }
+
+    const sys = await this.lookupLocalPasswdUser(username);
+    if (!sys.exists) {
+      return;
+    }
+    if (sys.uid !== undefined && sys.uid < 1000) {
+      return;
+    }
+
+    const { scriptPath } = await this.resolveOnConnectAssets();
+    const argv = [
+      ...(this.config.useSudo ? ["sudo", "-n"] : []),
+      "/bin/bash",
+      scriptPath,
+      "--reposition-plank",
+      username,
+    ];
+
+    const proc = Bun.spawn(argv, {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [exitCode, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+
+    for (const rawLine of stdout.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (line && !line.startsWith("[status]")) {
+        console.log(`${new Date().toISOString()} ${line}`);
+      }
+    }
+
+    if (exitCode !== 0) {
+      const detail = stderr.trim() || `exit code ${exitCode}`;
+      console.warn(
+        `${new Date().toISOString()} [on-connect] Plank reposition script exited with error for '${username}': ${detail}`
       );
     }
   }
