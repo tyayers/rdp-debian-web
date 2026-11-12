@@ -369,13 +369,12 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
     const mockAppsDir = path.join(tmpDir, "applications");
     await fs.mkdir(mockAppsDir, { recursive: true });
     for (const app of [
-      "pcmanfm-qt.desktop",
+      "apigee-user-home.desktop",
       "qterminal.desktop",
       "featherpad.desktop",
       "google-chrome.desktop",
       "codium.desktop",
-      "antigravity-ide.desktop",
-      "antigravity-cli.desktop",
+      "antigravity.desktop",
     ]) {
       await fs.writeFile(path.join(mockAppsDir, app), `[Desktop Entry]\nType=Application\nName=${app}\n`);
     }
@@ -400,10 +399,14 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
       ON_CONNECT_SKIP_PROCESS_CHECK: "1",
     };
 
-    // Pre-seed a stale numbered dockitem to verify outdated items are cleaned up
+    // Pre-seed both numbered and unnumbered default Plank dockitems + disabled lxqt-panel override
     const plankDir = path.join(freshHome, ".config", "plank", "dock1", "launchers");
+    const autostartDir = path.join(freshHome, ".config", "autostart");
     await fs.mkdir(plankDir, { recursive: true });
+    await fs.mkdir(autostartDir, { recursive: true });
     await fs.writeFile(path.join(plankDir, "99-stale-old-item.dockitem"), "[PlankItemsDockItemPreferences]\n");
+    await fs.writeFile(path.join(plankDir, "clock.dockitem"), "[PlankItemsDockItemPreferences]\n");
+    await fs.writeFile(path.join(autostartDir, "lxqt-panel.desktop"), "[Desktop Entry]\nHidden=true\n");
 
     await mgr.runOnConnectHook("alice", {
       homeDirOverride: freshHome,
@@ -415,45 +418,50 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
 
     const panelConfPath = path.join(freshHome, ".config", "lxqt", "panel.conf");
     const plankAutostartPath = path.join(freshHome, ".config", "autostart", "plank.desktop");
+    const sessionInitAutostartPath = path.join(freshHome, ".config", "autostart", "apigee-session-init.desktop");
     const pcmanfmConfPath = path.join(freshHome, ".config", "pcmanfm-qt", "lxqt", "settings.conf");
-    const userWallpaperPath = path.join(freshHome, ".local", "share", "backgrounds", "wallpaper.png");
+    const pcmanfmDefaultConfPath = path.join(freshHome, ".config", "pcmanfm-qt", "default", "settings.conf");
+    const userWallpaperPath = path.join(freshHome, ".local", "share", "backgrounds", "wallpaper.jpg");
 
     const firstPass = await fs.readFile(panelConfPath, "utf8");
     const plankDesktop = await fs.readFile(plankAutostartPath, "utf8");
+    const sessionInitDesktop = await fs.readFile(sessionInitAutostartPath, "utf8");
     const pcmanfmConf = await fs.readFile(pcmanfmConfPath, "utf8");
+    const pcmanfmDefaultConf = await fs.readFile(pcmanfmDefaultConfPath, "utf8");
     const wallpaperStat = await fs.stat(userWallpaperPath);
+    const sourceWallpaperStat = await fs.stat(path.resolve("public/wallpaper.jpg"));
 
+    expect(await Bun.file(path.join(autostartDir, "lxqt-panel.desktop")).exists()).toBe(false);
     expect(firstPass).toContain("[General]\n__userfile__=true\npanels=panel1");
     expect(firstPass).toContain("position=Top");
     expect(plankDesktop).toContain("Exec=plank");
-    expect(wallpaperStat.size).toBeGreaterThan(100_000);
+    expect(sessionInitDesktop).toContain("Exec=/usr/local/bin/apigee-session-init");
+    expect(wallpaperStat.size).toBe(sourceWallpaperStat.size);
     expect(pcmanfmConf).toContain("QuickExec=true");
+    expect(pcmanfmDefaultConf).toContain("QuickExec=true");
     expect(pcmanfmConf).toContain(`Wallpaper=${userWallpaperPath}`);
-    expect(pcmanfmConf).toContain("WallpaperMode=fit");
-    expect(pcmanfmConf).toContain("BgColor=#1e1e21");
+    expect(pcmanfmConf).toContain("WallpaperMode=zoom");
 
-    // Verify all 5 Desktop shortcuts exist and are executable (0755)
+    // Verify all 4 Desktop shortcuts exist and are executable (0755)
     for (const app of [
       "qterminal.desktop",
       "google-chrome.desktop",
       "codium.desktop",
-      "antigravity-ide.desktop",
-      "antigravity-cli.desktop",
+      "antigravity.desktop",
     ]) {
       const desktopShortcut = path.join(freshHome, "Desktop", app);
       const stat = await fs.stat(desktopShortcut);
       expect(stat.mode & 0o111).toBeGreaterThan(0);
     }
 
-    // Verify all 7 Plank dockitems exist in ordered sequence and stale item was removed
+    // Verify exact 6 Plank dockitems exist in ordered sequence and ALL stale/unnumbered items were removed
     const expectedDockItems = [
-      ["01-pcmanfm-qt.dockitem", "pcmanfm-qt.desktop"],
-      ["02-qterminal.dockitem", "qterminal.desktop"],
-      ["03-featherpad.dockitem", "featherpad.desktop"],
-      ["04-google-chrome.dockitem", "google-chrome.desktop"],
-      ["05-codium.dockitem", "codium.desktop"],
-      ["06-antigravity-ide.dockitem", "antigravity-ide.desktop"],
-      ["07-antigravity-cli.dockitem", "antigravity-cli.desktop"],
+      ["01-home.dockitem", "apigee-user-home.desktop"],
+      ["02-chrome.dockitem", "google-chrome.desktop"],
+      ["03-codium.dockitem", "codium.desktop"],
+      ["04-terminal.dockitem", "qterminal.desktop"],
+      ["05-text-editor.dockitem", "featherpad.desktop"],
+      ["06-antigravity.dockitem", "antigravity.desktop"],
     ] as const;
 
     for (const [dockFile, desktopFile] of expectedDockItems) {
@@ -462,6 +470,7 @@ describe("Apigee AI Demos — Auth, VM User Provisioning, and IronRDP WASM Gatew
       expect(content).toContain(`Launcher=file://${path.join(mockAppsDir, desktopFile)}`);
     }
     expect(await Bun.file(path.join(plankDir, "99-stale-old-item.dockitem")).exists()).toBe(false);
+    expect(await Bun.file(path.join(plankDir, "clock.dockitem")).exists()).toBe(false);
 
     // Second connect is idempotent
     await mgr.runOnConnectHook("alice", { homeDirOverride: freshHome, envOverrides });

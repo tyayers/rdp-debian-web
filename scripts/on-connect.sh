@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_WALLPAPER_SRC="$SCRIPT_DIR/../public/wallpaper.png"
+DEFAULT_WALLPAPER_SRC="$SCRIPT_DIR/../public/wallpaper.jpg"
 WALLPAPER_SRC="${ON_CONNECT_WALLPAPER_SRC:-$DEFAULT_WALLPAPER_SRC}"
 APPS_DIR="${ON_CONNECT_APPS_DIR:-/usr/share/applications}"
 
@@ -42,38 +42,39 @@ install_or_update_system_tools() {
 
   export DEBIAN_FRONTEND=noninteractive
 
-  local uname_m deb_arch cli_arch ide_platform
+  local uname_m deb_arch cli_arch app_platform
   uname_m="$(uname -m)"
   deb_arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
   case "$uname_m" in
     x86_64|amd64)
       cli_arch="amd64"
-      ide_platform="linux-x64"
+      app_platform="linux-x64"
       ;;
     aarch64|arm64)
       cli_arch="arm64"
-      ide_platform="linux-arm"
+      app_platform="linux-arm"
       ;;
     *)
       cli_arch="amd64"
-      ide_platform="linux-x64"
+      app_platform="linux-x64"
       ;;
   esac
 
-  # 1a. Base desktop packages: Plank dock, QTerminal, PCManFM-Qt file manager, FeatherPad text editor
+  # 1a. Base desktop packages: Plank, QTerminal, PCManFM-Qt, FeatherPad, GIO/GVFS & dconf
   local missing_base=0
   local cmd
-  for cmd in curl gpg plank qterminal pcmanfm-qt featherpad; do
+  for cmd in curl gpg plank qterminal pcmanfm-qt featherpad gio dconf; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
     fi
   done
   if [[ "$missing_base" -eq 1 ]]; then
-    echo "[status] Installing Plank, Terminal, File Manager & Text Editor..."
+    echo "[status] Installing Plank, Terminal, Text Editor & desktop utilities..."
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
-      ca-certificates curl gpg plank qterminal pcmanfm-qt featherpad
+      ca-certificates curl gpg plank qterminal pcmanfm-qt featherpad \
+      libglib2.0-bin gvfs dconf-cli
   fi
 
   # 1b. VSCodium (codium)
@@ -113,8 +114,75 @@ EOF
     fi
   fi
 
-  # 1d. Antigravity CLI (current latest release installed to /usr/local/bin/agy for all users)
   install -d -m 0755 /usr/local/bin /usr/local/share/antigravity /usr/share/pixmaps /usr/share/applications /usr/share/backgrounds
+
+  # Shared official Antigravity icon
+  if [[ ! -s /usr/share/pixmaps/antigravity.png ]]; then
+    curl -fsSL --max-time 8 -o /usr/share/pixmaps/antigravity.png \
+      "https://antigravity.google/assets/image/antigravity-logo.png" 2>/dev/null || true
+    [[ -f /usr/share/pixmaps/antigravity.png ]] && chmod 0644 /usr/share/pixmaps/antigravity.png
+  fi
+
+  # 1d. Antigravity 2.0 Desktop App (current latest release from antigravity-hub)
+  local hub_releases first_hub hub_ver hub_exec_id hub_release_id installed_hub_id
+  hub_releases="$(curl -fsSL --max-time 8 "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/releases" 2>/dev/null || true)"
+  first_hub="$(printf '%s' "$hub_releases" | tr '}' '\n' | head -n1)"
+  hub_ver="$(parse_json_string "$first_hub" "version")"
+  hub_exec_id="$(parse_json_string "$first_hub" "execution_id")"
+  hub_release_id=""
+  if [[ -n "$hub_ver" && -n "$hub_exec_id" ]]; then
+    hub_release_id="${hub_ver}-${hub_exec_id}"
+  fi
+  installed_hub_id="$(cat /opt/antigravity/.release-id 2>/dev/null || true)"
+
+  if [[ -n "$hub_release_id" ]] && [[ ! -x /opt/antigravity/antigravity || "$installed_hub_id" != "$hub_release_id" ]]; then
+    echo "[status] Installing Antigravity v${hub_ver}..."
+    local hub_url hub_tmp hub_stage
+    hub_url="https://storage.googleapis.com/antigravity-public/antigravity-hub/${hub_release_id}/${app_platform}/Antigravity.tar.gz"
+    hub_tmp="$(mktemp /tmp/antigravity-app.XXXXXX.tar.gz)"
+    hub_stage="/opt/antigravity.tmp.$$"
+    rm -rf -- "$hub_stage"
+    mkdir -p -- "$hub_stage"
+
+    if curl -fsSL -o "$hub_tmp" "$hub_url" && tar -xzf "$hub_tmp" -C "$hub_stage" --strip-components=1; then
+      if [[ -f "$hub_stage/chrome-sandbox" ]]; then
+        chown root:root "$hub_stage/chrome-sandbox"
+        chmod 4755 "$hub_stage/chrome-sandbox"
+      fi
+      printf '%s\n' "$hub_release_id" >"$hub_stage/.release-id"
+      rm -rf /opt/antigravity
+      mv -- "$hub_stage" /opt/antigravity
+      ln -sf /opt/antigravity/antigravity /usr/local/bin/antigravity
+      echo "[on-connect] Installed Antigravity v${hub_ver} (${hub_release_id}) -> /opt/antigravity"
+    else
+      echo "[on-connect] Warning: failed downloading or extracting Antigravity from $hub_url" >&2
+      rm -rf -- "$hub_stage"
+    fi
+    rm -f -- "$hub_tmp"
+  fi
+
+  if [[ -x /opt/antigravity/antigravity ]]; then
+    local app_icon="applications-development"
+    if [[ -s /usr/share/pixmaps/antigravity.png ]]; then
+      app_icon="/usr/share/pixmaps/antigravity.png"
+    fi
+    cat >/usr/share/applications/antigravity.desktop <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Antigravity
+Comment=Google Antigravity Desktop Application
+Exec=/opt/antigravity/antigravity %U
+Icon=$app_icon
+Terminal=false
+StartupNotify=true
+StartupWMClass=Antigravity
+Categories=Development;Utility;
+EOF
+    chmod 0644 /usr/share/applications/antigravity.desktop
+  fi
+
+  # 1e. Antigravity CLI (current latest release installed to /usr/local/bin/agy for terminal use)
   local cli_manifest cli_ver cli_url cli_sha512 installed_cli_ver
   cli_manifest="$(curl -fsSL --max-time 8 "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_${cli_arch}.json" 2>/dev/null || true)"
   cli_ver="$(parse_json_string "$cli_manifest" "version")"
@@ -148,46 +216,7 @@ EOF
     curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin || true
   fi
 
-  if [[ ! -f /usr/share/pixmaps/antigravity-cli.png ]]; then
-    curl -fsSL --max-time 8 -o /usr/share/pixmaps/antigravity-cli.png \
-      "https://antigravity.google/assets/image/antigravity-logo.png" 2>/dev/null || true
-    [[ -f /usr/share/pixmaps/antigravity-cli.png ]] && chmod 0644 /usr/share/pixmaps/antigravity-cli.png
-  fi
-
-  cat >/usr/local/bin/agy-terminal <<'EOF'
-#!/usr/bin/env bash
-cd "$HOME" || exit 1
-if command -v qterminal >/dev/null 2>&1; then
-  exec qterminal -w "$HOME" -e "/usr/local/bin/agy"
-fi
-for term in x-terminal-emulator lxterminal xfce4-terminal gnome-terminal xterm; do
-  if command -v "$term" >/dev/null 2>&1; then
-    exec "$term" -e /usr/local/bin/agy
-  fi
-done
-exec /usr/local/bin/agy
-EOF
-  chmod 0755 /usr/local/bin/agy-terminal
-
-  local cli_icon="utilities-terminal"
-  if [[ -s /usr/share/pixmaps/antigravity-cli.png ]]; then
-    cli_icon="/usr/share/pixmaps/antigravity-cli.png"
-  fi
-  cat >/usr/share/applications/antigravity-cli.desktop <<EOF
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Antigravity CLI
-Comment=Google Antigravity AI Agent CLI (agy)
-Exec=/usr/local/bin/agy-terminal
-Icon=$cli_icon
-Terminal=false
-StartupNotify=false
-Categories=Development;Utility;
-EOF
-  chmod 0644 /usr/share/applications/antigravity-cli.desktop
-
-  # 1e. Antigravity IDE (current latest release installed to /opt/antigravity-ide for all users)
+  # 1f. Antigravity IDE (kept up-to-date in /opt/antigravity-ide)
   local ide_releases first_release ide_ver ide_exec_id ide_release_id installed_ide_id
   ide_releases="$(curl -fsSL --max-time 8 "https://antigravity-ide-auto-updater-974169037036.us-central1.run.app/releases" 2>/dev/null || true)"
   first_release="$(printf '%s' "$ide_releases" | tr '}' '\n' | head -n1)"
@@ -202,7 +231,7 @@ EOF
   if [[ -n "$ide_release_id" ]] && [[ ! -x /opt/antigravity-ide/antigravity-ide || "$installed_ide_id" != "$ide_release_id" ]]; then
     echo "[status] Installing Antigravity IDE v${ide_ver}..."
     local ide_url ide_tmp ide_stage
-    ide_url="https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${ide_release_id}/${ide_platform}/Antigravity%20IDE.tar.gz"
+    ide_url="https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${ide_release_id}/${app_platform}/Antigravity%20IDE.tar.gz"
     ide_tmp="$(mktemp /tmp/antigravity-ide.XXXXXX.tar.gz)"
     ide_stage="/opt/antigravity-ide.tmp.$$"
     rm -rf -- "$ide_stage"
@@ -233,8 +262,6 @@ EOF
     local ide_icon="text-editor"
     if [[ -s /usr/share/pixmaps/antigravity-ide.png ]]; then
       ide_icon="/usr/share/pixmaps/antigravity-ide.png"
-    elif [[ -s /opt/antigravity-ide/resources/app/resources/linux/code.png ]]; then
-      ide_icon="/opt/antigravity-ide/resources/app/resources/linux/code.png"
     fi
     cat >/usr/share/applications/antigravity-ide.desktop <<EOF
 [Desktop Entry]
@@ -252,9 +279,75 @@ EOF
     chmod 0644 /usr/share/applications/antigravity-ide.desktop
   fi
 
+  # 1g. Shared "Home" launcher for Plank dock (opens user's Home directory directly)
+  cat >/usr/share/applications/apigee-user-home.desktop <<'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Home
+Comment=Open Home Folder
+Exec=sh -c 'exec pcmanfm-qt "$HOME"'
+Icon=user-home
+Terminal=false
+NoDisplay=true
+Categories=System;FileManager;
+EOF
+  chmod 0644 /usr/share/applications/apigee-user-home.desktop
+
+  # 1h. Session startup helper ensuring GVFS desktop shortcut trust, Plank dock order, and lxqt-panel
+  cat >/usr/local/bin/apigee-session-init <<'EOF'
+#!/usr/bin/env bash
+# Runs inside the user's active LXQt D-Bus/X11 session on login (and on reconnect)
+
+apply_trust_and_dock() {
+  # 1. Mark all ~/Desktop/*.desktop shortcuts trusted in GVFS so they launch on double-click without prompts
+  if command -v gio >/dev/null 2>&1 && [[ -d "$HOME/Desktop" ]]; then
+    for f in "$HOME/Desktop"/*.desktop; do
+      [[ -f "$f" ]] && gio set "$f" metadata::trusted true 2>/dev/null || true
+    done
+  fi
+
+  # 2. Sync Plank dock-items ordering via dconf if available
+  if command -v dconf >/dev/null 2>&1 && [[ -d "$HOME/.config/plank/dock1/launchers" ]]; then
+    local items=() item joined
+    for item in "$HOME/.config/plank/dock1/launchers"/*.dockitem; do
+      [[ -f "$item" ]] || continue
+      items+=("'$(basename -- "$item")'")
+    done
+    if [[ "${#items[@]}" -gt 0 ]]; then
+      joined="$(IFS=,; printf '%s' "${items[*]}")"
+      dconf write /net/launchpad/plank/docks/dock1/dock-items "[${joined}]" 2>/dev/null || true
+      dconf write /net/launchpad/plank/docks/dock1/show-dock-item "false" 2>/dev/null || true
+    fi
+  fi
+}
+
+ensure_panel_and_dock_running() {
+  if command -v lxqt-panel >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
+    nohup lxqt-panel </dev/null >/dev/null 2>&1 &
+  fi
+  if command -v plank >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
+    nohup plank </dev/null >/dev/null 2>&1 &
+  fi
+}
+
+apply_trust_and_dock
+if [[ "${1:-}" == "--Immediate" ]]; then
+  ensure_panel_and_dock_running
+else
+  (
+    sleep 2
+    apply_trust_and_dock
+    ensure_panel_and_dock_running
+  ) </dev/null >/dev/null 2>&1 &
+fi
+EOF
+  chmod 0755 /usr/local/bin/apigee-session-init
+
   # Stage shared copy of wallpaper in /usr/share/backgrounds as well
   if [[ -f "$WALLPAPER_SRC" ]]; then
-    install -m 0644 "$WALLPAPER_SRC" /usr/share/backgrounds/apigee-wallpaper.png
+    install -m 0644 "$WALLPAPER_SRC" /usr/share/backgrounds/apigee-wallpaper.jpg
+    rm -f /usr/share/backgrounds/apigee-wallpaper.png
   fi
 }
 
@@ -331,7 +424,8 @@ run_serialized_system_install
 
 echo "[status] Configuring LXQt desktop, wallpaper & Plank launchers..."
 
-# 2. Enforce LXQt top panel configuration (~/.config/lxqt/panel.conf)
+# 2. Enforce LXQt top panel configuration (~/.config/lxqt/panel.conf) & ensure panel is never disabled
+rm -f -- "$HOMEDIR/.config/autostart/lxqt-panel.desktop"
 PANEL_CONF="$HOMEDIR/.config/lxqt/panel.conf"
 if write_user_file "$PANEL_CONF" 0644 <<'EOF'
 [General]
@@ -372,126 +466,127 @@ then
   echo "[on-connect] Applied LXQt panel.conf for '$USERNAME'"
 fi
 
-# 3. Copy wallpaper into user's home directory & configure PCManFM-Qt Desktop
+# 3. Copy wallpaper.jpg into user's home directory & configure PCManFM-Qt (both lxqt and default profiles!)
 USER_WALLPAPER_DIR="$HOMEDIR/.local/share/backgrounds"
-USER_WALLPAPER="$USER_WALLPAPER_DIR/wallpaper.png"
+USER_WALLPAPER="$USER_WALLPAPER_DIR/wallpaper.jpg"
 ensure_user_dir "$HOMEDIR/.local"
 ensure_user_dir "$HOMEDIR/.local/share"
 ensure_user_dir "$USER_WALLPAPER_DIR"
+rm -f -- "$USER_WALLPAPER_DIR/wallpaper.png"
 
-WALLPAPER_UPDATED=0
+PCMANFM_NEEDS_RELOAD=0
 if [[ -f "$WALLPAPER_SRC" ]]; then
   if write_user_file "$USER_WALLPAPER" 0644 <"$WALLPAPER_SRC"; then
-    WALLPAPER_UPDATED=1
+    PCMANFM_NEEDS_RELOAD=1
   fi
-elif [[ -f /usr/share/backgrounds/apigee-wallpaper.png ]]; then
-  if write_user_file "$USER_WALLPAPER" 0644 </usr/share/backgrounds/apigee-wallpaper.png; then
-    WALLPAPER_UPDATED=1
+elif [[ -f /usr/share/backgrounds/apigee-wallpaper.jpg ]]; then
+  if write_user_file "$USER_WALLPAPER" 0644 </usr/share/backgrounds/apigee-wallpaper.jpg; then
+    PCMANFM_NEEDS_RELOAD=1
   fi
 fi
 
-PCMANFM_CONF="$HOMEDIR/.config/pcmanfm-qt/lxqt/settings.conf"
-ensure_user_dir "$HOMEDIR/.config/pcmanfm-qt"
-ensure_user_dir "$HOMEDIR/.config/pcmanfm-qt/lxqt"
+update_pcmanfm_profile() {
+  local profile_name="$1"
+  local conf_dir="$HOMEDIR/.config/pcmanfm-qt/$profile_name"
+  local conf_file="$conf_dir/settings.conf"
+  ensure_user_dir "$HOMEDIR/.config/pcmanfm-qt"
+  ensure_user_dir "$conf_dir"
 
-PCMANFM_SEED="$PCMANFM_CONF"
-TMP_PCMANFM_SEED=""
-if [[ ! -f "$PCMANFM_CONF" && -f /etc/xdg/pcmanfm-qt/lxqt/settings.conf ]]; then
-  TMP_PCMANFM_SEED="$(mktemp "${TMPDIR:-/tmp}/pcmanfm-seed.XXXXXX")"
-  cp -- /etc/xdg/pcmanfm-qt/lxqt/settings.conf "$TMP_PCMANFM_SEED"
-  PCMANFM_SEED="$TMP_PCMANFM_SEED"
-fi
+  local seed="$conf_file"
+  local tmp_seed=""
+  if [[ ! -f "$conf_file" && -f "/etc/xdg/pcmanfm-qt/$profile_name/settings.conf" ]]; then
+    tmp_seed="$(mktemp "${TMPDIR:-/tmp}/pcmanfm-seed.XXXXXX")"
+    cp -- "/etc/xdg/pcmanfm-qt/$profile_name/settings.conf" "$tmp_seed"
+    seed="$tmp_seed"
+  fi
 
-TMP_PCMANFM_OUT="$(mktemp "${TMPDIR:-/tmp}/pcmanfm-out.XXXXXX")"
-if [[ -f "$PCMANFM_SEED" ]]; then
-  TARGET_WALLPAPER="$USER_WALLPAPER" awk '
-    BEGIN {
-      sec = ""
-      saw_behavior = 0; set_quickexec = 0
-      saw_desktop = 0; set_wp = 0; set_wpmode = 0; set_bgcolor = 0
-    }
-    function flush_sec() {
-      if (sec == "Behavior" && !set_quickexec) {
-        print "QuickExec=true"
-        set_quickexec = 1
-      } else if (sec == "Desktop") {
-        if (!set_wp) { print "Wallpaper=" ENVIRON["TARGET_WALLPAPER"]; set_wp = 1 }
-        if (!set_wpmode) { print "WallpaperMode=fit"; set_wpmode = 1 }
-        if (!set_bgcolor) { print "BgColor=#1e1e21"; set_bgcolor = 1 }
+  local tmp_out
+  tmp_out="$(mktemp "${TMPDIR:-/tmp}/pcmanfm-out.XXXXXX")"
+  if [[ -f "$seed" ]]; then
+    TARGET_WALLPAPER="$USER_WALLPAPER" awk '
+      BEGIN {
+        sec = ""
+        saw_behavior = 0; set_quickexec = 0
+        saw_desktop = 0; set_wp = 0; set_wpmode = 0
       }
-    }
-    /^\[[^]]+\][ \t]*$/ {
-      flush_sec()
-      sec = $0
-      sub(/^\[/, "", sec)
-      sub(/\][ \t]*$/, "", sec)
-      if (sec == "Behavior") saw_behavior = 1
-      if (sec == "Desktop") saw_desktop = 1
-      print $0
-      next
-    }
-    {
-      if (sec == "Behavior" && $0 ~ /^QuickExec=/) {
-        print "QuickExec=true"
-        set_quickexec = 1
+      function flush_sec() {
+        if (sec == "Behavior" && !set_quickexec) {
+          print "QuickExec=true"
+          set_quickexec = 1
+        } else if (sec == "Desktop") {
+          if (!set_wp) { print "Wallpaper=" ENVIRON["TARGET_WALLPAPER"]; set_wp = 1 }
+          if (!set_wpmode) { print "WallpaperMode=zoom"; set_wpmode = 1 }
+        }
+      }
+      /^\[[^]]+\][ \t]*$/ {
+        flush_sec()
+        sec = $0
+        sub(/^\[/, "", sec)
+        sub(/\][ \t]*$/, "", sec)
+        if (sec == "Behavior") saw_behavior = 1
+        if (sec == "Desktop") saw_desktop = 1
+        print $0
         next
       }
-      if (sec == "Desktop") {
-        if ($0 ~ /^Wallpaper=/) {
+      {
+        if (sec == "Behavior" && $0 ~ /^QuickExec=/) {
+          print "QuickExec=true"
+          set_quickexec = 1
+          next
+        }
+        if (sec == "Desktop") {
+          if ($0 ~ /^Wallpaper=/) {
+            print "Wallpaper=" ENVIRON["TARGET_WALLPAPER"]
+            set_wp = 1
+            next
+          }
+          if ($0 ~ /^WallpaperMode=/) {
+            print "WallpaperMode=zoom"
+            set_wpmode = 1
+            next
+          }
+        }
+        print $0
+      }
+      END {
+        flush_sec()
+        if (!saw_behavior) {
+          print ""
+          print "[Behavior]"
+          print "QuickExec=true"
+        }
+        if (!saw_desktop) {
+          print ""
+          print "[Desktop]"
           print "Wallpaper=" ENVIRON["TARGET_WALLPAPER"]
-          set_wp = 1
-          next
-        }
-        if ($0 ~ /^WallpaperMode=/) {
-          print "WallpaperMode=fit"
-          set_wpmode = 1
-          next
-        }
-        if ($0 ~ /^BgColor=/) {
-          print "BgColor=#1e1e21"
-          set_bgcolor = 1
-          next
+          print "WallpaperMode=zoom"
         }
       }
-      print $0
-    }
-    END {
-      flush_sec()
-      if (!saw_behavior) {
-        print ""
-        print "[Behavior]"
-        print "QuickExec=true"
-      }
-      if (!saw_desktop) {
-        print ""
-        print "[Desktop]"
-        print "Wallpaper=" ENVIRON["TARGET_WALLPAPER"]
-        print "WallpaperMode=fit"
-        print "BgColor=#1e1e21"
-      }
-    }
-  ' "$PCMANFM_SEED" >"$TMP_PCMANFM_OUT"
-else
-  cat >"$TMP_PCMANFM_OUT" <<EOF
+    ' "$seed" >"$tmp_out"
+  else
+    cat >"$tmp_out" <<EOF
 [Behavior]
 QuickExec=true
 
 [Desktop]
 Wallpaper=$USER_WALLPAPER
-WallpaperMode=fit
-BgColor=#1e1e21
+WallpaperMode=zoom
 EOF
-fi
-[[ -n "$TMP_PCMANFM_SEED" ]] && rm -f -- "$TMP_PCMANFM_SEED"
+  fi
+  [[ -n "$tmp_seed" ]] && rm -f -- "$tmp_seed"
 
-if write_user_file "$PCMANFM_CONF" 0644 <"$TMP_PCMANFM_OUT"; then
-  WALLPAPER_UPDATED=1
-fi
-rm -f -- "$TMP_PCMANFM_OUT"
+  if write_user_file "$conf_file" 0644 <"$tmp_out"; then
+    PCMANFM_NEEDS_RELOAD=1
+  fi
+  rm -f -- "$tmp_out"
+}
 
-# 4. Ensure Plank is configured in XDG autostart (~/.config/autostart/plank.desktop)
+update_pcmanfm_profile "lxqt"
+update_pcmanfm_profile "default"
+
+# 4. Ensure Plank & Session Init helper are configured in XDG autostart (~/.config/autostart/)
 PLANK_AUTOSTART="$HOMEDIR/.config/autostart/plank.desktop"
-if write_user_file "$PLANK_AUTOSTART" 0644 <<'EOF'
+write_user_file "$PLANK_AUTOSTART" 0644 <<'EOF' || true
 [Desktop Entry]
 Type=Application
 Name=Plank
@@ -502,33 +597,60 @@ Terminal=false
 Hidden=false
 NoDisplay=false
 EOF
-then
-  echo "[on-connect] Added Plank to autostart for '$USERNAME'"
-fi
+
+SESSION_INIT_AUTOSTART="$HOMEDIR/.config/autostart/apigee-session-init.desktop"
+write_user_file "$SESSION_INIT_AUTOSTART" 0644 <<'EOF' || true
+[Desktop Entry]
+Type=Application
+Name=Apigee Session Setup
+Comment=Marks desktop shortcuts trusted and verifies panel & dock
+Exec=/usr/local/bin/apigee-session-init
+Terminal=false
+Hidden=false
+NoDisplay=true
+EOF
 
 # 5. Populate Desktop shortcuts (~/Desktop) & Plank launchers (dock1/launchers)
 DESKTOP_DIR="$HOMEDIR/Desktop"
+USER_APPS_DIR="$HOMEDIR/.local/share/applications"
 PLANK_LAUNCHERS_DIR="$HOMEDIR/.config/plank/dock1/launchers"
 ensure_user_dir "$DESKTOP_DIR"
+ensure_user_dir "$USER_APPS_DIR"
 ensure_user_dir "$HOMEDIR/.config/plank"
 ensure_user_dir "$HOMEDIR/.config/plank/dock1"
 ensure_user_dir "$PLANK_LAUNCHERS_DIR"
 
+# Ensure per-user Home folder launcher exists (used by Plank's Home dock icon)
+HOME_LAUNCHER_PATH="$APPS_DIR/apigee-user-home.desktop"
+if [[ ! -f "$HOME_LAUNCHER_PATH" ]]; then
+  HOME_LAUNCHER_PATH="$USER_APPS_DIR/apigee-user-home.desktop"
+  write_user_file "$HOME_LAUNCHER_PATH" 0644 <<'EOF' || true
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Home
+Comment=Open Home Folder
+Exec=sh -c 'exec pcmanfm-qt "$HOME"'
+Icon=user-home
+Terminal=false
+NoDisplay=true
+Categories=System;FileManager;
+EOF
+fi
+
 TERM_DESKTOP="$(find_existing_desktop qterminal.desktop lxterminal.desktop xfce4-terminal.desktop xterm.desktop)"
-FILEMAN_DESKTOP="$(find_existing_desktop pcmanfm-qt.desktop thunar.desktop org.gnome.Nautilus.desktop)"
 EDITOR_DESKTOP="$(find_existing_desktop featherpad.desktop org.featherpad.FeatherPad.desktop mousepad.desktop org.gnome.TextEditor.desktop)"
 CHROME_DESKTOP="$(find_existing_desktop google-chrome.desktop chromium.desktop)"
 CODIUM_DESKTOP="codium.desktop"
-AGY_IDE_DESKTOP="antigravity-ide.desktop"
-AGY_CLI_DESKTOP="antigravity-cli.desktop"
+ANTIGRAVITY_APP_DESKTOP="antigravity.desktop"
 
-# Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity IDE, Antigravity CLI
+# Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity (remove old IDE/CLI shortcuts)
+rm -f -- "$DESKTOP_DIR/antigravity-ide.desktop" "$DESKTOP_DIR/antigravity-cli.desktop"
 DESKTOP_SHORTCUTS=(
   "$TERM_DESKTOP"
   "$CHROME_DESKTOP"
   "$CODIUM_DESKTOP"
-  "$AGY_IDE_DESKTOP"
-  "$AGY_CLI_DESKTOP"
+  "$ANTIGRAVITY_APP_DESKTOP"
 )
 
 for desktop_file in "${DESKTOP_SHORTCUTS[@]}"; do
@@ -538,41 +660,43 @@ for desktop_file in "${DESKTOP_SHORTCUTS[@]}"; do
   write_user_file "$DESKTOP_DIR/$desktop_file" 0755 <"$src_desktop" || true
 done
 
-# Shortcuts pinned on Plank dock: File Manager, Terminal, Text Editor, Chrome, VSCodium, Antigravity IDE, Antigravity CLI
-PLANK_SHORTCUTS=(
-  "$FILEMAN_DESKTOP"
-  "$TERM_DESKTOP"
-  "$EDITOR_DESKTOP"
-  "$CHROME_DESKTOP"
-  "$CODIUM_DESKTOP"
-  "$AGY_IDE_DESKTOP"
-  "$AGY_CLI_DESKTOP"
-)
-
+# Exact Plank dock items: Home, Chrome, VSCodium, Terminal, Text Editor, Antigravity
 declare -A EXPECTED_DOCKITEMS=()
-dock_seq=0
-for desktop_file in "${PLANK_SHORTCUTS[@]}"; do
-  [[ -z "$desktop_file" ]] && continue
-  src_desktop="$APPS_DIR/$desktop_file"
-  [[ ! -f "$src_desktop" ]] && continue
+PLANK_CHANGED=0
 
-  dock_seq=$((dock_seq + 1))
-  base_name="${desktop_file%.desktop}"
-  dockitem_name="$(printf '%02d-%s.dockitem' "$dock_seq" "$base_name")"
+add_plank_item() {
+  local idx="$1"
+  local slug="$2"
+  local launcher_path="$3"
+  [[ ! -f "$launcher_path" ]] && return 0
+
+  local dockitem_name
+  dockitem_name="$(printf '%02d-%s.dockitem' "$idx" "$slug")"
   EXPECTED_DOCKITEMS["$dockitem_name"]=1
 
-  write_user_file "$PLANK_LAUNCHERS_DIR/$dockitem_name" 0644 <<EOF || true
+  if write_user_file "$PLANK_LAUNCHERS_DIR/$dockitem_name" 0644 <<EOF
 [PlankItemsDockItemPreferences]
-Launcher=file://$src_desktop
+Launcher=file://$launcher_path
 EOF
-done
+  then
+    PLANK_CHANGED=1
+  fi
+}
 
-# Remove any outdated numbered dockitems from previous ordering so icons never duplicate
-for existing_item in "$PLANK_LAUNCHERS_DIR"/[0-9][0-9]-*.dockitem; do
+add_plank_item 1 "home" "$HOME_LAUNCHER_PATH"
+add_plank_item 2 "chrome" "$APPS_DIR/$CHROME_DESKTOP"
+add_plank_item 3 "codium" "$APPS_DIR/$CODIUM_DESKTOP"
+add_plank_item 4 "terminal" "$APPS_DIR/$TERM_DESKTOP"
+add_plank_item 5 "text-editor" "$APPS_DIR/$EDITOR_DESKTOP"
+add_plank_item 6 "antigravity" "$APPS_DIR/$ANTIGRAVITY_APP_DESKTOP"
+
+# Remove ALL other .dockitem files (including Plank's unnumbered first-run defaults like pcmanfm-qt/clock)
+for existing_item in "$PLANK_LAUNCHERS_DIR"/*.dockitem; do
   [[ ! -e "$existing_item" ]] && continue
   item_base="$(basename -- "$existing_item")"
   if [[ -z "${EXPECTED_DOCKITEMS[$item_base]:-}" ]]; then
     rm -f -- "$existing_item"
+    PLANK_CHANGED=1
   fi
 done
 
@@ -582,7 +706,7 @@ if [[ -x /usr/local/bin/agy && -e "$HOMEDIR/.local/bin/agy" && ! -L "$HOMEDIR/.l
   [[ "$(id -u)" -eq 0 ]] && chown -h "$USER_UID:$USER_GID" -- "$HOMEDIR/.local/bin/agy"
 fi
 
-# 6. Apply live updates (Plank + Wallpaper) if reconnecting to an already-running LXQt session
+# 6. Apply live updates if reconnecting to an already-running LXQt session
 if [[ "${ON_CONNECT_SKIP_PROCESS_CHECK:-0}" != "1" ]] && command -v pgrep >/dev/null 2>&1; then
   LXQT_PID="$(pgrep -u "$USER_UID" -x lxqt-session 2>/dev/null | head -n1 || true)"
   if [[ -n "$LXQT_PID" && -r "/proc/$LXQT_PID/environ" ]]; then
@@ -605,20 +729,42 @@ if [[ "${ON_CONNECT_SKIP_PROCESS_CHECK:-0}" != "1" ]] && command -v pgrep >/dev/
       [[ -n "$SAVED_XDG_RUNTIME" ]] && ENV_ARGS+=("XDG_RUNTIME_DIR=$SAVED_XDG_RUNTIME")
       [[ -n "$SAVED_DBUS" ]] && ENV_ARGS+=("DBUS_SESSION_BUS_ADDRESS=$SAVED_DBUS")
 
-      if command -v plank >/dev/null 2>&1 && ! pgrep -u "$USER_UID" -x plank >/dev/null 2>&1; then
+      run_in_user_session() {
         if [[ "$(id -u)" -eq 0 ]] && command -v runuser >/dev/null 2>&1; then
-          runuser -u "$USERNAME" -- env "${ENV_ARGS[@]}" nohup plank </dev/null >/dev/null 2>&1 &
+          runuser -u "$USERNAME" -- env "${ENV_ARGS[@]}" "$@"
         elif [[ "$(id -u)" -eq "$USER_UID" ]]; then
-          env "${ENV_ARGS[@]}" nohup plank </dev/null >/dev/null 2>&1 &
+          env "${ENV_ARGS[@]}" "$@"
         fi
-        echo "[on-connect] Started Plank in active LXQt session ($SAVED_DISPLAY) for '$USERNAME'"
+      }
+
+      # If PCManFM-Qt settings (QuickExec=true or WallpaperMode=zoom) changed while running,
+      # restart pcmanfm-qt --desktop so its in-memory Launcher reloads QuickExec=true!
+      if [[ "$PCMANFM_NEEDS_RELOAD" -eq 1 ]] && command -v pcmanfm-qt >/dev/null 2>&1; then
+        pkill -u "$USER_UID" -x pcmanfm-qt 2>/dev/null || true
+        sleep 0.2
+        update_pcmanfm_profile "lxqt"
+        update_pcmanfm_profile "default"
+        if ! pgrep -u "$USER_UID" -x pcmanfm-qt >/dev/null 2>&1; then
+          run_in_user_session nohup pcmanfm-qt --desktop --profile=lxqt </dev/null >/dev/null 2>&1 &
+        fi
       fi
 
-      if [[ "$WALLPAPER_UPDATED" -eq 1 && -f "$USER_WALLPAPER" ]] && command -v pcmanfm-qt >/dev/null 2>&1; then
-        if [[ "$(id -u)" -eq 0 ]] && command -v runuser >/dev/null 2>&1; then
-          runuser -u "$USERNAME" -- env "${ENV_ARGS[@]}" pcmanfm-qt --set-wallpaper="$USER_WALLPAPER" --wallpaper-mode=fit </dev/null >/dev/null 2>&1 || true
-        elif [[ "$(id -u)" -eq "$USER_UID" ]]; then
-          env "${ENV_ARGS[@]}" pcmanfm-qt --set-wallpaper="$USER_WALLPAPER" --wallpaper-mode=fit </dev/null >/dev/null 2>&1 || true
+      # If Plank launcher set changed while Plank is running, restart Plank cleanly to refresh order
+      if [[ "$PLANK_CHANGED" -eq 1 ]] && pgrep -u "$USER_UID" -x plank >/dev/null 2>&1; then
+        pkill -u "$USER_UID" -x plank 2>/dev/null || true
+        sleep 0.2
+      fi
+
+      # Run apigee-session-init inside the live session (sets gio metadata::trusted, dconf dock order,
+      # and guarantees BOTH lxqt-panel and plank are running!)
+      if [[ -x /usr/local/bin/apigee-session-init ]]; then
+        run_in_user_session /usr/local/bin/apigee-session-init --Immediate </dev/null >/dev/null 2>&1 || true
+      else
+        if command -v lxqt-panel >/dev/null 2>&1 && ! pgrep -u "$USER_UID" -x lxqt-panel >/dev/null 2>&1; then
+          run_in_user_session nohup lxqt-panel </dev/null >/dev/null 2>&1 &
+        fi
+        if command -v plank >/dev/null 2>&1 && ! pgrep -u "$USER_UID" -x plank >/dev/null 2>&1; then
+          run_in_user_session nohup plank </dev/null >/dev/null 2>&1 &
         fi
       fi
     fi

@@ -70,11 +70,11 @@ sudo "$(which bun)" run start
 
 ## VM Tool Bootstrap & Per-Connect Desktop Enforcement (`scripts/on-connect.sh`)
 
-- **Installed once system-wide for everyone (`--system-only`)**: On startup (when run via `sudo ./apigee-ai-demos`), the server ensures **Plank**, **QTerminal**, **PCManFM-Qt** (file manager), **FeatherPad** (text editor), **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), and the **current latest releases** of **Antigravity CLI** (`/usr/local/bin/agy`) and **Antigravity IDE** (`/opt/antigravity-ide`) are installed once at the OS level for all users.
+- **Installed once system-wide for everyone (`--system-only`)**: On startup (when run via `sudo ./apigee-ai-demos`), the server ensures **Plank**, **QTerminal**, **PCManFM-Qt** (file manager), **FeatherPad** (text editor), **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed once at the OS level for all users.
 - **Applied per user on connect (`./scripts/on-connect.sh <username> <homedir>`)**:
-  1. Enforces the top **LXQt** panel layout (`~/.config/lxqt/panel.conf`) and configures **Plank** in `~/.config/autostart/plank.desktop`.
-  2. Copies `public/wallpaper.png` into `~/.local/share/backgrounds/wallpaper.png` and sets it as the LXQt desktop background (`~/.config/pcmanfm-qt/lxqt/settings.conf`).
-  3. Places shortcuts on `~/Desktop` (**Terminal**, **Google Chrome**, **VSCodium**, **Antigravity IDE**, **Antigravity CLI**) and pins launchers on the **Plank** dock (**File Manager**, **Terminal**, **Text Editor**, **Google Chrome**, **VSCodium**, **Antigravity IDE**, **Antigravity CLI**).
+  1. Enforces the top **LXQt** panel layout (`~/.config/lxqt/panel.conf`), guarantees `lxqt-panel` and `plank` are running, and marks `~/Desktop/*.desktop` shortcuts trusted (`QuickExec=true` + GVFS `metadata::trusted=true`) so they execute immediately without prompts.
+  2. Copies `public/wallpaper.jpg` into `~/.local/share/backgrounds/wallpaper.jpg` and sets it as the LXQt desktop background with `WallpaperMode=zoom` (`~/.config/pcmanfm-qt/lxqt/settings.conf`).
+  3. Places shortcuts on `~/Desktop` (**Terminal**, **Google Chrome**, **VSCodium**, **Antigravity**) and pins exact launchers on the **Plank** dock (**Home**, **Google Chrome**, **VSCodium**, **Terminal**, **Text Editor**, **Antigravity**).
 
 ## Troubleshooting Black Screen / Immediate Disconnect
 

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "./config.ts";
 import { POSIX_USERNAME_RE, RESERVED_USERNAMES } from "./auth.ts";
-import { EMBEDDED_ON_CONNECT_SCRIPT, EMBEDDED_WALLPAPER_PNG } from "./embedded-assets.ts";
+import { EMBEDDED_ON_CONNECT_SCRIPT, EMBEDDED_WALLPAPER_JPG } from "./embedded-assets.ts";
 
 export interface VmUserStatus {
   username: string;
@@ -320,11 +320,11 @@ export class VmUserManager {
       scriptPath = fallbackPath;
     }
 
-    let wallpaperPath = path.join(this.config.publicDir, "wallpaper.png");
+    let wallpaperPath = path.join(this.config.publicDir, "wallpaper.jpg");
     if (!(await Bun.file(wallpaperPath).exists())) {
       await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o755 });
-      const fallbackWallpaper = path.join(this.config.dataDir, "wallpaper.png");
-      const bytes = await Bun.file(EMBEDDED_WALLPAPER_PNG).arrayBuffer();
+      const fallbackWallpaper = path.join(this.config.dataDir, "wallpaper.jpg");
+      const bytes = await Bun.file(EMBEDDED_WALLPAPER_JPG).arrayBuffer();
       await fs.writeFile(fallbackWallpaper, Buffer.from(bytes), { mode: 0o644 });
       wallpaperPath = fallbackWallpaper;
     }
