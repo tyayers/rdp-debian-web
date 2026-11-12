@@ -57,9 +57,12 @@ sudo "$(which bun)" run start
 Then access via your GCP IAP domain, or directly with `?user=test@example.com`:
 `https://your-domain.com/?user=test@example.com`
 
-## VM Tool Bootstrap & Per-Connect Desktop Enforcement (`scripts/on-connect.sh`)
+## VM Tool Bootstrap & Session Lifecycle (`scripts/on-connect.sh`)
 
-- **Installed once system-wide for everyone (`--system-only`)**: On startup, the server ensures **Plank**, **QTerminal**, **PCManFM-Qt**, **FeatherPad**, **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed once at the OS level.
+- **Installed once system-wide for everyone (`--system-only`)**: On startup, the server ensures **Plank**, **QTerminal**, **PCManFM-Qt**, **FeatherPad**, **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed once at the OS level, and configures `/etc/xrdp/sesman.ini` (`KillDisconnected=true`, `DisconnectedTimeLimit=60`).
+- **Fresh sign-in on every connect & forced sign-out on disconnect**:
+  - Before opening a new `xrdp` connection, `scripts/on-connect.sh <username> <homedir>` terminates any lingering `xrdp` / `LXQt` graphical session for that user first (leaving SSH sessions untouched) so `xrdp-sesman` always performs a clean desktop sign-in.
+  - Whenever the user disconnects (closes the browser tab, reloads, clicks **Disconnect**, or signs out), the server immediately runs `scripts/on-connect.sh --signout <username>` to sign out their desktop session.
 - **Applied per user on connect (`./scripts/on-connect.sh <username> <homedir>`)**:
   1. Enforces the top **LXQt** panel layout (`~/.config/lxqt/panel.conf`, including explicit `menu_file=/etc/xdg/menus/lxqt-applications.menu` and a right-aligned **Sign Out** button), guarantees `lxqt-panel` and `plank` are running, and marks `~/Desktop/*.desktop` shortcuts trusted.
   2. Copies `public/wallpaper.jpg` into `~/.local/share/backgrounds/wallpaper.jpg` with `WallpaperMode=zoom`.

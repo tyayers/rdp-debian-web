@@ -36,6 +36,7 @@ export interface SystemUserAdapter {
   passwdPath?: string;
   execCommand?: (argv: string[], stdinText?: string) => Promise<{ exitCode: number; stderr: string }>;
   skipSystemOnConnect?: boolean;
+  onTerminateSession?: (username: string, reason: "pre-connect" | "disconnect") => Promise<void> | void;
 }
 
 const PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
@@ -182,6 +183,7 @@ function assertSafeUsername(username: string): void {
 
 export class VmUserManager {
   private writeLock: Promise<void> = Promise.resolve();
+  private readonly userSessionLocks = new Map<string, Promise<void>>();
   private readonly syncedThisBoot = new Set<string>();
   private readonly passwdPath: string;
 
@@ -219,6 +221,31 @@ export class VmUserManager {
       return await fn();
     } finally {
       release();
+    }
+  }
+
+  /**
+   * Serializes connect/sign-out lifecycle operations per Linux username so a disconnecting
+   * tab's sign-out completes cleanly before a newly opened/reloaded tab starts its fresh session.
+   */
+  async withUserSessionLock<T>(username: string, fn: () => Promise<T>): Promise<T> {
+    assertSafeUsername(username);
+    const prev = this.userSessionLocks.get(username) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = prev.then(() => gate);
+    this.userSessionLocks.set(username, tail);
+
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.userSessionLocks.get(username) === tail) {
+        this.userSessionLocks.delete(username);
+      }
     }
   }
 
@@ -463,6 +490,9 @@ export class VmUserManager {
       return;
     }
     if (this.adapter?.skipSystemOnConnect && !options?.homeDirOverride) {
+      if (this.adapter.onTerminateSession) {
+        await this.adapter.onTerminateSession(username, "pre-connect");
+      }
       return;
     }
 
@@ -534,6 +564,67 @@ export class VmUserManager {
       if (options?.homeDirOverride) {
         throw new Error(`on-connect script failed: ${detail}`);
       }
+    }
+  }
+
+  /**
+   * Forces an immediate sign-out of any running or disconnected xrdp/LXQt graphical session
+   * for `username` (invoked when the user's browser WebSocket disconnects or logs out).
+   */
+  async terminateDesktopSession(
+    username: string,
+    reason: "pre-connect" | "disconnect" = "disconnect"
+  ): Promise<void> {
+    assertSafeUsername(username);
+
+    if (this.adapter?.onTerminateSession) {
+      await this.adapter.onTerminateSession(username, reason);
+    }
+    if (!this.config.onConnectScript || this.adapter?.skipSystemOnConnect) {
+      return;
+    }
+
+    const sys = await this.lookupLocalPasswdUser(username);
+    if (!sys.exists) {
+      return;
+    }
+    if (sys.uid !== undefined && sys.uid < 1000) {
+      throw new Error(`Account '${username}' conflicts with a system UID (${sys.uid})`);
+    }
+
+    const { scriptPath } = await this.resolveOnConnectAssets();
+    const argv = [
+      ...(this.config.useSudo ? ["sudo", "-n"] : []),
+      "/bin/bash",
+      scriptPath,
+      "--signout",
+      username,
+    ];
+
+    const proc = Bun.spawn(argv, {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [exitCode, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+
+    for (const rawLine of stdout.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (line && !line.startsWith("[status]")) {
+        console.log(`${new Date().toISOString()} ${line}`);
+      }
+    }
+
+    if (exitCode !== 0) {
+      const detail = stderr.trim() || `exit code ${exitCode}`;
+      console.warn(
+        `${new Date().toISOString()} [on-connect] Sign-out script exited with error for '${username}': ${detail}`
+      );
     }
   }
 

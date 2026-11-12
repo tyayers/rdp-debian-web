@@ -4,8 +4,10 @@
 # Modes:
 #   1) System-wide bootstrap (run once at server startup as root for all users):
 #        ./scripts/on-connect.sh --system-only
-#   2) Per-user session setup (run before opening xrdp for <username>):
+#   2) Per-user session setup (terminates any stale xrdp session, then prepares fresh configs):
 #        ./scripts/on-connect.sh <username> [homedir]
+#   3) Force sign-out of a user's xrdp/LXQt desktop session (run on browser disconnect):
+#        ./scripts/on-connect.sh --signout <username>
 
 set -euo pipefail
 
@@ -117,13 +119,23 @@ EOF
     fi
   fi
 
-  install -d -m 0755 /usr/local/bin /usr/local/share/antigravity /usr/share/pixmaps /usr/share/applications /usr/share/backgrounds
+  install -d -m 0755 \
+    /usr/local/bin \
+    /usr/local/share/antigravity \
+    /usr/share/pixmaps \
+    /usr/share/icons/hicolor/256x256/apps \
+    /usr/share/applications \
+    /usr/share/backgrounds
 
-  # Shared official Antigravity icon
+  # Shared official Antigravity icon (installed into both pixmaps and hicolor theme for QIcon::fromTheme)
   if [[ ! -s /usr/share/pixmaps/antigravity.png ]]; then
     curl -fsSL --max-time 8 -o /usr/share/pixmaps/antigravity.png \
       "https://antigravity.google/assets/image/antigravity-logo.png" 2>/dev/null || true
     [[ -f /usr/share/pixmaps/antigravity.png ]] && chmod 0644 /usr/share/pixmaps/antigravity.png
+  fi
+  if [[ -s /usr/share/pixmaps/antigravity.png ]]; then
+    install -m 0644 /usr/share/pixmaps/antigravity.png /usr/share/icons/hicolor/256x256/apps/antigravity.png
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
   fi
 
   # 1d. Antigravity 2.0 Desktop App (current latest release from antigravity-hub)
@@ -165,9 +177,14 @@ EOF
   fi
 
   if [[ -x /opt/antigravity/antigravity ]]; then
+    if [[ ! -s /usr/share/pixmaps/antigravity.png && -f /opt/antigravity/resources/app/resources/linux/code.png ]]; then
+      install -m 0644 /opt/antigravity/resources/app/resources/linux/code.png /usr/share/pixmaps/antigravity.png
+      install -m 0644 /usr/share/pixmaps/antigravity.png /usr/share/icons/hicolor/256x256/apps/antigravity.png
+      command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+    fi
     local app_icon="applications-development"
     if [[ -s /usr/share/pixmaps/antigravity.png ]]; then
-      app_icon="/usr/share/pixmaps/antigravity.png"
+      app_icon="antigravity"
     fi
     cat >/usr/share/applications/antigravity.desktop <<EOF
 [Desktop Entry]
@@ -319,10 +336,12 @@ export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-LXQt}"
 export XDG_MENU_PREFIX="${XDG_MENU_PREFIX:-lxqt-}"
 
 apply_trust_and_dock() {
-  # 1. Mark all ~/Desktop/*.desktop shortcuts trusted in GVFS so they launch on double-click without prompts
+  # 1. Mark any ~/Desktop/*.desktop files trusted in GVFS (LXQt libfm-qt uses 'metadata::trust')
   if command -v gio >/dev/null 2>&1 && [[ -d "$HOME/Desktop" ]]; then
     for f in "$HOME/Desktop"/*.desktop; do
-      [[ -f "$f" ]] && gio set "$f" metadata::trusted true 2>/dev/null || true
+      [[ -f "$f" ]] || continue
+      gio set -t string "$f" metadata::trust true 2>/dev/null || true
+      gio set -t string "$f" metadata::trusted true 2>/dev/null || true
     done
   fi
 
@@ -368,6 +387,73 @@ EOF
     install -m 0644 "$WALLPAPER_SRC" /usr/share/backgrounds/apigee-wallpaper.jpg
     rm -f /usr/share/backgrounds/apigee-wallpaper.png
   fi
+
+  # 1i. Configure xrdp-sesman (/etc/xrdp/sesman.ini) to reap disconnected sessions automatically
+  local sesman_ini="${ON_CONNECT_SESMAN_INI:-/etc/xrdp/sesman.ini}"
+  if [[ -f "$sesman_ini" ]]; then
+    local sesman_tmp
+    sesman_tmp="$(mktemp "${TMPDIR:-/tmp}/sesman-ini.XXXXXX")"
+    awk '
+      BEGIN {
+        sec = ""
+        saw_sessions = 0
+        set_kill = 0
+        set_limit = 0
+      }
+      function flush_sessions() {
+        if (sec == "Sessions") {
+          if (!set_kill) { print "KillDisconnected=true"; set_kill = 1 }
+          if (!set_limit) { print "DisconnectedTimeLimit=60"; set_limit = 1 }
+        }
+      }
+      /^\[[^]]+\][ \t]*$/ {
+        flush_sessions()
+        sec = $0
+        sub(/^\[/, "", sec)
+        sub(/\][ \t]*$/, "", sec)
+        if (sec == "Sessions") saw_sessions = 1
+        print $0
+        next
+      }
+      {
+        if (sec == "Sessions") {
+          if ($0 ~ /^[#; \t]*KillDisconnected=/) {
+            if (!set_kill) {
+              print "KillDisconnected=true"
+              set_kill = 1
+            }
+            next
+          }
+          if ($0 ~ /^[#; \t]*DisconnectedTimeLimit=/) {
+            if (!set_limit) {
+              print "DisconnectedTimeLimit=60"
+              set_limit = 1
+            }
+            next
+          }
+        }
+        print $0
+      }
+      END {
+        flush_sessions()
+        if (!saw_sessions) {
+          print ""
+          print "[Sessions]"
+          print "KillDisconnected=true"
+          print "DisconnectedTimeLimit=60"
+        }
+      }
+    ' "$sesman_ini" >"$sesman_tmp"
+
+    if ! cmp -s "$sesman_tmp" "$sesman_ini"; then
+      chmod 0644 "$sesman_tmp"
+      mv -f -- "$sesman_tmp" "$sesman_ini"
+      echo "[on-connect] Updated $sesman_ini (KillDisconnected=true, DisconnectedTimeLimit=60)"
+      pkill -HUP -x xrdp-sesman 2>/dev/null || systemctl reload xrdp-sesman 2>/dev/null || true
+    else
+      rm -f -- "$sesman_tmp"
+    fi
+  fi
 }
 
 run_serialized_system_install() {
@@ -384,16 +470,162 @@ run_serialized_system_install() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Per-user xrdp / LXQt desktop session sign-out helper (never touches sshd)
+# ---------------------------------------------------------------------------
+list_user_xrdp_logind_sessions() {
+  local target_user="$1"
+  local target_uid="$2"
+  command -v loginctl >/dev/null 2>&1 || return 0
+
+  local sid s_name s_user s_service s_type
+  while read -r sid _; do
+    [[ -z "$sid" ]] && continue
+    s_name=""
+    s_user=""
+    s_service=""
+    s_type=""
+    while IFS='=' read -r k v; do
+      case "$k" in
+        Name) s_name="$v" ;;
+        User) s_user="$v" ;;
+        Service) s_service="$v" ;;
+        Type) s_type="$v" ;;
+      esac
+    done < <(loginctl show-session "$sid" -p Name -p User -p Service -p Type 2>/dev/null || true)
+
+    if [[ "$s_name" == "$target_user" || "$s_user" == "$target_uid" ]]; then
+      if [[ "$s_service" == "xrdp-sesman" || "$s_type" == "x11" || "$s_type" == "wayland" ]]; then
+        printf '%s\n' "$sid"
+      fi
+    fi
+  done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
+}
+
+list_user_xrdp_pids() {
+  local target_uid="$1"
+  command -v pgrep >/dev/null 2>&1 || return 0
+  [[ -z "$target_uid" || "$target_uid" -lt 1000 ]] && return 0
+
+  local pid comm
+  while read -r pid; do
+    [[ -z "$pid" || "$pid" == "$$" ]] && continue
+    comm=""
+    read -r comm <"/proc/$pid/comm" 2>/dev/null || true
+    case "$comm" in
+      lxqt-session|lxqt-panel|pcmanfm-qt|plank|openbox|xfwm4|xrdp-chansrv|Xorg|Xvnc)
+        printf '%s\n' "$pid"
+        continue
+        ;;
+    esac
+    if grep -qzE '^(XRDP_SESSION|LXQT_SESSION_CONFIG)=' "/proc/$pid/environ" 2>/dev/null; then
+      printf '%s\n' "$pid"
+    fi
+  done < <(pgrep -u "$target_uid" 2>/dev/null || true)
+}
+
+terminate_user_xrdp_session() {
+  local target_user="$1"
+  if [[ "${ON_CONNECT_SKIP_PROCESS_CHECK:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  local target_uid
+  target_uid="$(id -u -- "$target_user" 2>/dev/null || true)"
+  if [[ -z "$target_uid" || "$target_uid" -lt 1000 ]]; then
+    return 0
+  fi
+  if [[ "$(id -u)" -ne 0 && "$(id -un)" != "$target_user" ]]; then
+    return 0
+  fi
+
+  local sids=() pids=() sid pid
+  while read -r sid; do
+    [[ -n "$sid" ]] && sids+=("$sid")
+  done < <(list_user_xrdp_logind_sessions "$target_user" "$target_uid")
+
+  while read -r pid; do
+    [[ -n "$pid" ]] && pids+=("$pid")
+  done < <(list_user_xrdp_pids "$target_uid")
+
+  if [[ "${#sids[@]}" -eq 0 && "${#pids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  echo "[status] Signing out previous desktop session..."
+  echo "[on-connect] Signing out xrdp desktop session for '$target_user' (uid=$target_uid, logind_sessions=${sids[*]:-none}, pids=${#pids[@]})"
+
+  # 1. Signal lxqt-session first so xrdp-sesexec tears down the session cleanly
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -TERM -u "$target_uid" -x lxqt-session 2>/dev/null || true
+  fi
+
+  # 2. Terminate any xrdp-sesman / X11 systemd-logind session scopes (leaves sshd untouched)
+  for sid in "${sids[@]}"; do
+    loginctl terminate-session "$sid" 2>/dev/null || true
+  done
+
+  # 3. Send SIGTERM to all xrdp/LXQt/Xorg processes for this user
+  if [[ "${#pids[@]}" -gt 0 ]]; then
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+  fi
+
+  # 4. Wait up to ~2.5s for all graphical processes and logind xrdp scopes to exit
+  local attempt remaining_pids remaining_sids
+  for ((attempt = 1; attempt <= 25; attempt++)); do
+    remaining_pids="$(list_user_xrdp_pids "$target_uid")"
+    remaining_sids="$(list_user_xrdp_logind_sessions "$target_user" "$target_uid")"
+    if [[ -z "$remaining_pids" && -z "$remaining_sids" ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  # 5. Force-kill any stubborn X11/xrdp stragglers and free any orphaned X11 display lock
+  pids=()
+  while read -r pid; do
+    [[ -n "$pid" ]] && pids+=("$pid")
+  done < <(list_user_xrdp_pids "$target_uid")
+
+  if [[ "${#pids[@]}" -gt 0 ]]; then
+    kill -KILL "${pids[@]}" 2>/dev/null || true
+    for ((attempt = 1; attempt <= 10; attempt++)); do
+      [[ -z "$(list_user_xrdp_pids "$target_uid")" ]] && break
+      sleep 0.05
+    done
+
+    local lockfile disp_num
+    for lockfile in /tmp/.X*-lock; do
+      [[ -f "$lockfile" ]] || continue
+      if [[ "$(stat -c '%u' "$lockfile" 2>/dev/null || echo -1)" == "$target_uid" ]]; then
+        disp_num="${lockfile#/tmp/.X}"
+        disp_num="${disp_num%-lock}"
+        rm -f -- "$lockfile" "/tmp/.X11-unix/X${disp_num}" 2>/dev/null || true
+      fi
+    done
+  fi
+
+  # Brief settle so xrdp-sesman finishes reaping xrdp-sesexec before a new login starts
+  sleep 0.15
+  echo "[on-connect] Signed out xrdp desktop session for '$target_user'"
+}
+
 if [[ "${1:-}" == "--system-only" ]]; then
   run_serialized_system_install
   echo "[on-connect] System-wide tool bootstrap complete"
   exit 0
 fi
 
+if [[ "${1:-}" == "--signout" ]]; then
+  SIGNOUT_USER="${2:?Usage: on-connect.sh --signout <username>}"
+  terminate_user_xrdp_session "$SIGNOUT_USER"
+  exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # Per-User Session Enforcement (<username> [homedir])
 # ---------------------------------------------------------------------------
-USERNAME="${1:?Usage: on-connect.sh <username> [homedir] | --system-only}"
+USERNAME="${1:?Usage: on-connect.sh <username> [homedir] | --signout <username> | --system-only}"
 HOMEDIR="${2:-$(getent passwd -- "$USERNAME" | cut -d: -f6 || true)}"
 HOMEDIR="${HOMEDIR:-/home/$USERNAME}"
 
@@ -440,6 +672,11 @@ write_user_file() {
 }
 
 run_serialized_system_install
+
+# Always sign out any previous/disconnected xrdp desktop session BEFORE writing configs
+# so xrdp-sesman starts a fresh desktop sign-in and dying panel/desktop processes cannot
+# overwrite newly written configuration files.
+terminate_user_xrdp_session "$USERNAME"
 
 echo "[status] Configuring LXQt desktop, wallpaper & Plank launchers..."
 
@@ -503,6 +740,7 @@ showOnlyCurrentDesktop=false
 type=spacer
 size=0
 expandable=true
+spaceType=invisible
 
 [kbindicator]
 alignment=Right
@@ -700,7 +938,10 @@ CHROME_DESKTOP="$(find_existing_desktop google-chrome.desktop chromium.desktop)"
 CODIUM_DESKTOP="codium.desktop"
 ANTIGRAVITY_APP_DESKTOP="antigravity.desktop"
 
-# Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity (remove old IDE/CLI shortcuts)
+# Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity (remove old IDE/CLI shortcuts).
+# Written as Type=Link shortcuts targeting /usr/share/applications/*.desktop: in LXQt libfm-qt
+# (FileInfo::isExecutableType), Type=Link entries targeting /usr/share/* are inherently trusted on disk
+# without needing GVFS metadata, avoiding both the '!' untrusted emblem and symlink arrow emblem.
 rm -f -- "$DESKTOP_DIR/antigravity-ide.desktop" "$DESKTOP_DIR/antigravity-cli.desktop"
 DESKTOP_SHORTCUTS=(
   "$TERM_DESKTOP"
@@ -709,11 +950,45 @@ DESKTOP_SHORTCUTS=(
   "$ANTIGRAVITY_APP_DESKTOP"
 )
 
+write_desktop_shortcut() {
+  local src_desktop="$1"
+  local dest_desktop="$2"
+  [[ ! -f "$src_desktop" ]] && return 0
+
+  local entry_name entry_icon entry_comment
+  entry_name="$(awk '
+    /^\[Desktop Entry\][ \t]*$/ { in_de=1; next }
+    /^\[[^]]+\][ \t]*$/ { in_de=0 }
+    in_de && /^Name=/ { sub(/^Name=/, ""); print; exit }
+  ' "$src_desktop")"
+  entry_icon="$(awk '
+    /^\[Desktop Entry\][ \t]*$/ { in_de=1; next }
+    /^\[[^]]+\][ \t]*$/ { in_de=0 }
+    in_de && /^Icon=/ { sub(/^Icon=/, ""); print; exit }
+  ' "$src_desktop")"
+  entry_comment="$(awk '
+    /^\[Desktop Entry\][ \t]*$/ { in_de=1; next }
+    /^\[[^]]+\][ \t]*$/ { in_de=0 }
+    in_de && /^Comment=/ { sub(/^Comment=/, ""); print; exit }
+  ' "$src_desktop")"
+
+  entry_name="${entry_name:-$(basename -- "$src_desktop" .desktop)}"
+  entry_icon="${entry_icon:-application-x-executable}"
+
+  {
+    printf '[Desktop Entry]\n'
+    printf 'Version=1.0\n'
+    printf 'Type=Link\n'
+    printf 'Name=%s\n' "$entry_name"
+    [[ -n "$entry_comment" ]] && printf 'Comment=%s\n' "$entry_comment"
+    printf 'Icon=%s\n' "$entry_icon"
+    printf 'URL=%s\n' "$src_desktop"
+  } | write_user_file "$dest_desktop" 0644 || true
+}
+
 for desktop_file in "${DESKTOP_SHORTCUTS[@]}"; do
   [[ -z "$desktop_file" ]] && continue
-  src_desktop="$APPS_DIR/$desktop_file"
-  [[ ! -f "$src_desktop" ]] && continue
-  write_user_file "$DESKTOP_DIR/$desktop_file" 0755 <"$src_desktop" || true
+  write_desktop_shortcut "$APPS_DIR/$desktop_file" "$DESKTOP_DIR/$desktop_file"
 done
 
 # Exact Plank dock items: Home, Chrome, VSCodium, Terminal, Text Editor, Antigravity
@@ -760,84 +1035,4 @@ done
 if [[ -x /usr/local/bin/agy && -e "$HOMEDIR/.local/bin/agy" && ! -L "$HOMEDIR/.local/bin/agy" ]]; then
   ln -sf /usr/local/bin/agy "$HOMEDIR/.local/bin/agy"
   [[ "$(id -u)" -eq 0 ]] && chown -h "$USER_UID:$USER_GID" -- "$HOMEDIR/.local/bin/agy"
-fi
-
-# 6. Apply live updates if reconnecting to an already-running LXQt session
-if [[ "${ON_CONNECT_SKIP_PROCESS_CHECK:-0}" != "1" ]] && command -v pgrep >/dev/null 2>&1; then
-  LXQT_PID="$(pgrep -u "$USER_UID" -x lxqt-session 2>/dev/null | head -n1 || true)"
-  if [[ -n "$LXQT_PID" && -r "/proc/$LXQT_PID/environ" ]]; then
-    SAVED_DISPLAY=""
-    SAVED_XAUTH=""
-    SAVED_XDG_RUNTIME=""
-    SAVED_DBUS=""
-    while IFS='=' read -r -d '' k v; do
-      case "$k" in
-        DISPLAY) SAVED_DISPLAY="$v" ;;
-        XAUTHORITY) SAVED_XAUTH="$v" ;;
-        XDG_RUNTIME_DIR) SAVED_XDG_RUNTIME="$v" ;;
-        DBUS_SESSION_BUS_ADDRESS) SAVED_DBUS="$v" ;;
-      esac
-    done <"/proc/$LXQT_PID/environ" || true
-
-    if [[ -n "$SAVED_DISPLAY" ]]; then
-      ENV_ARGS=(
-        "DISPLAY=$SAVED_DISPLAY"
-        "HOME=$HOMEDIR"
-        "USER=$USERNAME"
-        "LOGNAME=$USERNAME"
-        "XDG_CURRENT_DESKTOP=LXQt"
-        "XDG_MENU_PREFIX=lxqt-"
-      )
-      [[ -n "$SAVED_XAUTH" ]] && ENV_ARGS+=("XAUTHORITY=$SAVED_XAUTH")
-      [[ -n "$SAVED_XDG_RUNTIME" ]] && ENV_ARGS+=("XDG_RUNTIME_DIR=$SAVED_XDG_RUNTIME")
-      [[ -n "$SAVED_DBUS" ]] && ENV_ARGS+=("DBUS_SESSION_BUS_ADDRESS=$SAVED_DBUS")
-
-      run_in_user_session() {
-        if [[ "$(id -u)" -eq 0 ]] && command -v runuser >/dev/null 2>&1; then
-          runuser -u "$USERNAME" -- env "${ENV_ARGS[@]}" "$@"
-        elif [[ "$(id -u)" -eq "$USER_UID" ]]; then
-          env "${ENV_ARGS[@]}" "$@"
-        fi
-      }
-
-      # If panel.conf changed while lxqt-panel is running, stop lxqt-panel first (so it doesn't
-      # overwrite panel.conf on exit), re-apply panel.conf, and let apigee-session-init restart it!
-      if [[ "$PANEL_NEEDS_RELOAD" -eq 1 ]] && pgrep -u "$USER_UID" -x lxqt-panel >/dev/null 2>&1; then
-        pkill -u "$USER_UID" -x lxqt-panel 2>/dev/null || true
-        sleep 0.2
-        write_panel_conf || true
-      fi
-
-      # If PCManFM-Qt settings (QuickExec=true or WallpaperMode=zoom) changed while running,
-      # restart pcmanfm-qt --desktop so its in-memory Launcher reloads QuickExec=true!
-      if [[ "$PCMANFM_NEEDS_RELOAD" -eq 1 ]] && command -v pcmanfm-qt >/dev/null 2>&1; then
-        pkill -u "$USER_UID" -x pcmanfm-qt 2>/dev/null || true
-        sleep 0.2
-        update_pcmanfm_profile "lxqt"
-        update_pcmanfm_profile "default"
-        if ! pgrep -u "$USER_UID" -x pcmanfm-qt >/dev/null 2>&1; then
-          run_in_user_session nohup pcmanfm-qt --desktop --profile=lxqt </dev/null >/dev/null 2>&1 &
-        fi
-      fi
-
-      # If Plank launcher set changed while Plank is running, restart Plank cleanly to refresh order
-      if [[ "$PLANK_CHANGED" -eq 1 ]] && pgrep -u "$USER_UID" -x plank >/dev/null 2>&1; then
-        pkill -u "$USER_UID" -x plank 2>/dev/null || true
-        sleep 0.2
-      fi
-
-      # Run apigee-session-init inside the live session (sets gio metadata::trusted, dconf dock order,
-      # and guarantees BOTH lxqt-panel and plank are running!)
-      if [[ -x /usr/local/bin/apigee-session-init ]]; then
-        run_in_user_session /usr/local/bin/apigee-session-init --Immediate </dev/null >/dev/null 2>&1 || true
-      else
-        if command -v lxqt-panel >/dev/null 2>&1 && ! pgrep -u "$USER_UID" -x lxqt-panel >/dev/null 2>&1; then
-          run_in_user_session nohup lxqt-panel </dev/null >/dev/null 2>&1 &
-        fi
-        if command -v plank >/dev/null 2>&1 && ! pgrep -u "$USER_UID" -x plank >/dev/null 2>&1; then
-          run_in_user_session nohup plank </dev/null >/dev/null 2>&1 &
-        fi
-      fi
-    fi
-  fi
 fi

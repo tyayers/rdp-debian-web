@@ -183,9 +183,10 @@ function ensureRdpViewer() {
         setBanner(el.rdpErrorBanner, detail || "Unable to establish xrdp session.");
       } else {
         state.connecting = false;
-        el.rdpStatusText.textContent = detail || "Disconnected";
-        el.overlayHeading.textContent = detail === "Moved to new tab" ? "Active in new tab" : "Desktop disconnected";
-        el.overlayDesc.textContent = `Linux session user: ${state.user?.username || ""}`;
+        el.rdpStatusText.textContent = detail || "Signed out";
+        el.overlayHeading.textContent =
+          detail === "Moved to new tab" ? "Active in new tab" : "Desktop signed out";
+        el.overlayDesc.textContent = `Reconnect to start a fresh desktop session for '${state.user?.username || ""}'.`;
         el.rdpConnectOverlay.hidden = false;
         el.rdpReconnectBtn.hidden = false;
         el.disconnectBtn.hidden = true;
@@ -300,14 +301,19 @@ async function bootstrap() {
   el.disconnectBtn.addEventListener("click", () => {
     state.viewer?.disconnect();
     el.rdpStatusDot.dataset.state = "disconnected";
-    el.rdpStatusText.textContent = "Disconnected";
-    el.overlayHeading.textContent = "Desktop disconnected";
-    el.overlayDesc.textContent = `Linux session user: ${state.user?.username || ""}`;
+    el.rdpStatusText.textContent = "Signed out";
+    el.overlayHeading.textContent = "Desktop signed out";
+    el.overlayDesc.textContent = `Reconnect to start a fresh desktop session for '${state.user?.username || ""}'.`;
     el.rdpConnectOverlay.hidden = false;
     el.rdpReconnectBtn.hidden = false;
     el.disconnectBtn.hidden = true;
     el.clipboardBtn.disabled = true;
     el.cadBtn.disabled = true;
+  });
+
+  // Immediately close WebSocket on tab close / reload so the VM desktop session signs out right away
+  window.addEventListener("pagehide", () => {
+    state.viewer?.disconnect();
   });
 
   el.cadBtn.addEventListener("click", () => {

@@ -28,6 +28,55 @@ const MAX_X224_HANDSHAKE_BYTES = 2048;
 
 let nextConnectionSeq = 1;
 
+const activeSocketsByManager = new WeakMap<
+  VmUserManager,
+  Map<string, Set<ServerWebSocket<RdpWsContext>>>
+>();
+
+function getManagerSocketMap(
+  vmUsers: VmUserManager
+): Map<string, Set<ServerWebSocket<RdpWsContext>>> {
+  let map = activeSocketsByManager.get(vmUsers);
+  if (!map) {
+    map = new Map();
+    activeSocketsByManager.set(vmUsers, map);
+  }
+  return map;
+}
+
+export function registerRdpWsOpen(
+  ws: ServerWebSocket<RdpWsContext>,
+  vmUsers: VmUserManager
+): void {
+  const map = getManagerSocketMap(vmUsers);
+  const { username } = ws.data.user;
+  let set = map.get(username);
+  if (!set) {
+    set = new Set();
+    map.set(username, set);
+  }
+  set.add(ws);
+}
+
+function unregisterRdpWs(
+  ws: ServerWebSocket<RdpWsContext>,
+  vmUsers: VmUserManager
+): void {
+  const map = getManagerSocketMap(vmUsers);
+  const { username } = ws.data.user;
+  const set = map.get(username);
+  if (!set) return;
+  set.delete(ws);
+  if (set.size === 0) {
+    map.delete(username);
+  }
+}
+
+function hasActiveUserSockets(username: string, vmUsers: VmUserManager): boolean {
+  const set = getManagerSocketMap(vmUsers).get(username);
+  return Boolean(set && set.size > 0);
+}
+
 export interface RdpWsContext {
   connId: number;
   openedAt: number;
@@ -35,6 +84,9 @@ export interface RdpWsContext {
   rxBytes: number;
   user: SessionUser;
   phase: "awaiting_x224" | "provisioning" | "connecting" | "streaming" | "closed";
+  hadBackendSession: boolean;
+  superseded: boolean;
+  signoutScheduled: boolean;
   tcpSocket: net.Socket | null;
   tlsSocket: tls.TLSSocket | null;
   rdpHost: string;
@@ -49,6 +101,9 @@ export function createRdpWsContext(user: SessionUser, config: AppConfig): RdpWsC
     rxBytes: 0,
     user,
     phase: "awaiting_x224",
+    hadBackendSession: false,
+    superseded: false,
+    signoutScheduled: false,
     tcpSocket: null,
     tlsSocket: null,
     rdpHost: config.rdpHost,
@@ -96,6 +151,52 @@ export function cleanupSockets(ctx: RdpWsContext): void {
     }
     ctx.tcpSocket = null;
   }
+}
+
+function finalizeAndSignOut(
+  ws: ServerWebSocket<RdpWsContext>,
+  vmUsers: VmUserManager,
+  trigger: string
+): void {
+  unregisterRdpWs(ws, vmUsers);
+  cleanupSockets(ws.data);
+
+  if (ws.data.signoutScheduled || ws.data.superseded || !ws.data.hadBackendSession) {
+    return;
+  }
+  ws.data.signoutScheduled = true;
+
+  const { username } = ws.data.user;
+  void vmUsers.withUserSessionLock(username, async () => {
+    if (hasActiveUserSockets(username, vmUsers)) {
+      rdpLog(
+        ws.data,
+        `Skipping disconnect sign-out (${trigger}): '${username}' already has a newer active session`
+      );
+      return;
+    }
+    rdpLog(ws.data, `Forcing desktop sign-out for '${username}' after ${trigger}`);
+    try {
+      await vmUsers.terminateDesktopSession(username, "disconnect");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      rdpLog(ws.data, `Warning: failed terminating desktop session on disconnect: ${msg}`);
+    }
+  });
+}
+
+export function handleRdpWsClose(
+  ws: ServerWebSocket<RdpWsContext>,
+  code: number,
+  reason: string,
+  vmUsers: VmUserManager
+): void {
+  const elapsed = Date.now() - ws.data.openedAt;
+  rdpLog(
+    ws.data,
+    `Browser WebSocket closed (code=${code}, reason=${reason || "none"}, duration=${elapsed}ms, tx=${ws.data.txBytes}B, rx=${ws.data.rxBytes}B)`
+  );
+  finalizeAndSignOut(ws, vmUsers, "browser disconnect");
 }
 
 function describeProtocol(proto: number): string {
@@ -190,19 +291,47 @@ export function handleRdpWsMessage(
     }
 
     const x224Copy = Buffer.from(payload);
+    const { username, email } = ws.data.user;
+
+    // Close any older WebSocket tab for the same Linux user so the new tab gets a clean login
+    const existingSet = getManagerSocketMap(vmUsers).get(username);
+    if (existingSet) {
+      for (const otherWs of Array.from(existingSet)) {
+        if (otherWs === ws) continue;
+        otherWs.data.superseded = true;
+        existingSet.delete(otherWs);
+        rdpLog(otherWs.data, `Superseding previous connection in favor of #${ws.data.connId}`);
+        cleanupSockets(otherWs.data);
+        try {
+          otherWs.close(4001, "Session opened in another tab");
+        } catch {
+          // Ignore
+        }
+      }
+    }
+
     ws.data.phase = "provisioning";
 
-    void (async () => {
-      try {
-        await vmUsers.ensureProvisionedUser(ws.data.user.username, ws.data.user.email);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        sendErrorAndClose(ws, msg);
+    void vmUsers.withUserSessionLock(username, async () => {
+      if (ws.data.phase !== "provisioning") {
         return;
       }
 
       try {
-        await vmUsers.runOnConnectHook(ws.data.user.username, {
+        await vmUsers.ensureProvisionedUser(username, email);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        unregisterRdpWs(ws, vmUsers);
+        sendErrorAndClose(ws, msg);
+        return;
+      }
+
+      if (ws.data.phase !== "provisioning") {
+        return;
+      }
+
+      try {
+        await vmUsers.runOnConnectHook(username, {
           onProgress: (statusText) => sendStatusFrame(ws, statusText),
         });
       } catch (err) {
@@ -214,8 +343,9 @@ export function handleRdpWsMessage(
         return;
       }
       ws.data.phase = "connecting";
-      startBackendHandshake(ws, x224Copy);
-    })();
+      ws.data.hadBackendSession = true;
+      startBackendHandshake(ws, x224Copy, vmUsers);
+    });
     return;
   }
 
@@ -228,7 +358,11 @@ export function handleRdpWsMessage(
   }
 }
 
-function startBackendHandshake(ws: ServerWebSocket<RdpWsContext>, x224Req: Buffer): void {
+function startBackendHandshake(
+  ws: ServerWebSocket<RdpWsContext>,
+  x224Req: Buffer,
+  vmUsers: VmUserManager
+): void {
   const { rdpHost, rdpPort } = ws.data;
   rdpLog(
     ws.data,
@@ -275,7 +409,7 @@ function startBackendHandshake(ws: ServerWebSocket<RdpWsContext>, x224Req: Buffe
 
     if (isResponse && (code & 0x03) !== 0) {
       rdpLog(ws.data, `xrdp confirmed X.224 negotiation: ${describeProtocol(code)}; upgrading to TLS`);
-      upgradeToTls(ws, tcp, x224Confirm, leftover);
+      upgradeToTls(ws, tcp, x224Confirm, leftover, vmUsers);
     } else if (isResponse && code === 0) {
       sendErrorAndClose(
         ws,
@@ -321,12 +455,12 @@ function startBackendHandshake(ws: ServerWebSocket<RdpWsContext>, x224Req: Buffe
         ws.data,
         `xrdp TCP socket closed before TLS (hadError=${hadError}, duration=${elapsed}ms, tx=${ws.data.txBytes}B, rx=${ws.data.rxBytes}B)`
       );
-      ws.data.phase = "closed";
       try {
         ws.close(1000, "xrdp connection closed");
       } catch {
         // Ignore
       }
+      finalizeAndSignOut(ws, vmUsers, "xrdp TCP close");
     }
   });
 }
@@ -335,7 +469,8 @@ function upgradeToTls(
   ws: ServerWebSocket<RdpWsContext>,
   tcp: net.Socket,
   x224Confirm: Buffer,
-  leftover: Buffer
+  leftover: Buffer,
+  vmUsers: VmUserManager
 ): void {
   if (leftover.length > 0) {
     tcp.unshift(leftover);
@@ -373,7 +508,7 @@ function upgradeToTls(
       try {
         ws.sendBinary(out);
       } catch {
-        cleanupSockets(ws.data);
+        finalizeAndSignOut(ws, vmUsers, "WebSocket send error");
       }
     });
   });
@@ -395,12 +530,12 @@ function upgradeToTls(
             : ""
         }`
       );
-      ws.data.phase = "closed";
       try {
         ws.close(1000, "xrdp session closed");
       } catch {
         // Ignore
       }
+      finalizeAndSignOut(ws, vmUsers, "xrdp session close");
     }
   });
 }

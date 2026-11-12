@@ -10,10 +10,11 @@ import {
 import { VmUserManager, type SystemUserAdapter } from "./vm-users.ts";
 import { EMBEDDED_PUBLIC_FILES } from "./embedded-assets.ts";
 import {
-  cleanupSockets,
   createRdpWsContext,
+  handleRdpWsClose,
   handleRdpWsMessage,
   rdpLog,
+  registerRdpWsOpen,
   type RdpWsContext,
 } from "./rdp-proxy.ts";
 
@@ -251,11 +252,17 @@ export function createAppServer(
         }
       }
 
-      // Clear local cookie session (e.g. switching ?user=...)
+      // Clear local cookie session (e.g. switching ?user=...) and sign out desktop session
       if (pathname === "/api/auth/logout" && req.method === "POST") {
         const resolved = resolveRequestIdentity(req, config);
-        if (resolved && !("error" in resolved) && !verifyCsrf(req, resolved.session)) {
-          return jsonResponse({ error: "Invalid CSRF token" }, 403);
+        if (resolved && !("error" in resolved)) {
+          if (!verifyCsrf(req, resolved.session)) {
+            return jsonResponse({ error: "Invalid CSRF token" }, 403);
+          }
+          const logoutUser = resolved.session.username;
+          void vmUsers.withUserSessionLock(logoutUser, async () => {
+            await vmUsers.terminateDesktopSession(logoutUser, "disconnect");
+          });
         }
         const headers = new Headers();
         for (const cookie of clearSessionCookieHeaders(req, config)) {
@@ -326,16 +333,14 @@ export function createAppServer(
       maxPayloadLength: 16 * 1024 * 1024,
       idleTimeout: 120,
       sendPings: true,
+      open(ws) {
+        registerRdpWsOpen(ws, vmUsers);
+      },
       message(ws, message) {
         handleRdpWsMessage(ws, message, config, vmUsers);
       },
       close(ws, code, reason) {
-        const elapsed = Date.now() - ws.data.openedAt;
-        rdpLog(
-          ws.data,
-          `Browser WebSocket closed (code=${code}, reason=${reason || "none"}, duration=${elapsed}ms, tx=${ws.data.txBytes}B, rx=${ws.data.rxBytes}B)`
-        );
-        cleanupSockets(ws.data);
+        handleRdpWsClose(ws, code, reason, vmUsers);
       },
     },
   });

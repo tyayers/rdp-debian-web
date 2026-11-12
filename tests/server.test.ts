@@ -47,6 +47,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
   let fakePasswdPath = "";
   let usersYamlPath = "";
   let executedCommands: Array<{ argv: string[]; stdin?: string }> = [];
+  let terminatedEvents: Array<{ username: string; reason: "pre-connect" | "disconnect" }> = [];
   let mockRdpServer: net.Server;
   let mockRdpPort = 0;
   let receivedMcsConnectInitial: Buffer | null = null;
@@ -117,6 +118,9 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     const systemAdapter: SystemUserAdapter = {
       passwdPath: fakePasswdPath,
       skipSystemOnConnect: true,
+      onTerminateSession: async (username, reason) => {
+        terminatedEvents.push({ username, reason });
+      },
       execCommand: async (argv, stdinText) => {
         executedCommands.push({ argv, stdin: stdinText });
         if (argv.includes("/usr/sbin/useradd")) {
@@ -392,7 +396,30 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     });
 
     session.free();
+
+    const closedPromise = new Promise<void>((resolve) => {
+      ws.addEventListener("close", () => resolve());
+    });
     ws.close();
+    await closedPromise;
+
+    // Wait briefly for the async post-disconnect sign-out lock task to complete
+    for (let i = 0; i < 30; i++) {
+      if (
+        terminatedEvents.some(
+          (e) => e.username === "rdp_tester" && e.reason === "disconnect"
+        )
+      ) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    // Verify pre-connect reset ran before connecting AND disconnect sign-out ran on close!
+    const testerEvents = terminatedEvents
+      .filter((e) => e.username === "rdp_tester")
+      .map((e) => e.reason);
+    expect(testerEvents).toEqual(["pre-connect", "disconnect"]);
 
     // Verify WebSocket handshake also auto-created rdp_tester in /etc/passwd and users.yaml!
     const rawYaml = await fs.readFile(usersYamlPath, "utf8");
@@ -400,6 +427,81 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     expect(parsedYaml["rdp_tester"]?.email).toBe("rdp.tester@example.com");
     expect(parsedYaml["rdp_tester"]?.password.length).toBe(24);
     expect(receivedMcsConnectInitial).not.toBeNull();
+  });
+
+  test("superseding an open tab closes the old WebSocket (4001), starts a fresh login, and only signs out after the new tab disconnects", async () => {
+    const x224RequestFrame = new Uint8Array([
+      0x01, // FRAME_X224_REQ
+      0x03, 0x00, 0x00, 0x13,
+      0x0e,
+      0xe0,
+      0x00, 0x00,
+      0x00, 0x00,
+      0x00,
+      0x01, 0x00, 0x08, 0x00,
+      0x01, 0x00, 0x00, 0x00,
+    ]);
+
+    const wsUrl =
+      baseUrl.replace("http://", "ws://") + "/api/rdp/ws?user=tabuser%40example.com";
+
+    // Open Tab 1 and wait until streaming (0x02 X.224 Confirm)
+    const ws1 = new WebSocket(wsUrl);
+    ws1.binaryType = "arraybuffer";
+    const ws1Closed = new Promise<CloseEvent>((resolve) => {
+      ws1.addEventListener("close", (ev) => resolve(ev));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      ws1.addEventListener("open", () => ws1.send(x224RequestFrame));
+      ws1.addEventListener("message", (ev) => {
+        const bytes = new Uint8Array(ev.data as ArrayBuffer);
+        if (bytes[0] === 0x02) resolve();
+      });
+      ws1.addEventListener("error", () => reject(new Error("ws1 failed")));
+    });
+
+    // Open Tab 2 while Tab 1 is still active -> supersedes Tab 1 (4001) and runs pre-connect reset
+    const ws2 = new WebSocket(wsUrl);
+    ws2.binaryType = "arraybuffer";
+    await new Promise<void>((resolve, reject) => {
+      ws2.addEventListener("open", () => ws2.send(x224RequestFrame));
+      ws2.addEventListener("message", (ev) => {
+        const bytes = new Uint8Array(ev.data as ArrayBuffer);
+        if (bytes[0] === 0x02) resolve();
+      });
+      ws2.addEventListener("error", () => reject(new Error("ws2 failed")));
+    });
+
+    const closeEv1 = await ws1Closed;
+    expect(closeEv1.code).toBe(4001);
+
+    // While ws2 is still active, no post-disconnect sign-out should have killed ws2's session
+    await new Promise((r) => setTimeout(r, 50));
+    expect(
+      terminatedEvents
+        .filter((e) => e.username === "tabuser")
+        .map((e) => e.reason)
+    ).toEqual(["pre-connect", "pre-connect"]);
+
+    // Now close Tab 2 -> forced sign-out runs immediately
+    ws2.close();
+    for (let i = 0; i < 30; i++) {
+      if (
+        terminatedEvents.some(
+          (e) => e.username === "tabuser" && e.reason === "disconnect"
+        )
+      ) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    expect(
+      terminatedEvents
+        .filter((e) => e.username === "tabuser")
+        .map((e) => e.reason)
+    ).toEqual(["pre-connect", "pre-connect", "disconnect"]);
   });
 
   test("on-connect.sh applies LXQt panel, wallpaper, Plank autostart, and Desktop + Plank shortcuts", async () => {
@@ -415,7 +517,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     ]) {
       await fs.writeFile(
         path.join(mockAppsDir, appFile),
-        `[Desktop Entry]\nType=Application\nName=${appFile}\n`
+        `[Desktop Entry]\nType=Application\nName=Title ${appFile}\nIcon=icon-${appFile}\n[Desktop Action extra]\nName=Action Title\n`
       );
     }
 
@@ -464,10 +566,28 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     expect(await Bun.file(path.join(autostartDir, "lxqt-panel.desktop")).exists()).toBe(false);
     expect(firstPass).toContain("plugins=mainmenu, taskbar, spacer, kbindicator, signout");
     expect(firstPass).toContain("menu_file=/etc/xdg/menus/");
+    expect(firstPass).toContain("spaceType=invisible");
     expect(firstPass).toContain("[signout]\nalignment=Right\ntype=quicklaunch");
     expect(wallpaperStat.size).toBe(sourceWallpaperStat.size);
     expect(pcmanfmConf).toContain("QuickExec=true");
     expect(pcmanfmConf).toContain("WallpaperMode=zoom");
+
+    for (const desktopShortcut of [
+      "qterminal.desktop",
+      "google-chrome.desktop",
+      "codium.desktop",
+      "antigravity.desktop",
+    ]) {
+      const shortcutText = await fs.readFile(
+        path.join(freshHome, "Desktop", desktopShortcut),
+        "utf8"
+      );
+      expect(shortcutText).toContain("Type=Link");
+      expect(shortcutText).toContain(`Name=Title ${desktopShortcut}`);
+      expect(shortcutText).not.toContain("Action Title");
+      expect(shortcutText).toContain(`Icon=icon-${desktopShortcut}`);
+      expect(shortcutText).toContain(`URL=${path.join(mockAppsDir, desktopShortcut)}`);
+    }
 
     const expectedDockItems = [
       ["01-home.dockitem", "apigee-user-home.desktop"],
@@ -483,5 +603,16 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       expect(content).toContain(`Launcher=file://${path.join(mockAppsDir, desktopFile)}`);
     }
     expect(await Bun.file(path.join(plankDir, "clock.dockitem")).exists()).toBe(false);
+
+    // Verify --signout invocation succeeds cleanly
+    const signoutProc = Bun.spawn(
+      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "--signout", "alice"],
+      {
+        env: { ...process.env, ON_CONNECT_SKIP_PROCESS_CHECK: "1" },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    expect(await signoutProc.exited).toBe(0);
   });
 });

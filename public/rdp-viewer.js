@@ -295,15 +295,15 @@ export class RdpViewer {
       // on_terminated(reason)
       (reason) => {
         const elapsed = this.connectedAt ? Date.now() - this.connectedAt : 0;
-        const shortLived = elapsed < 8000 || this.framesDrawn <= 2;
+        const startupFailure = this.framesDrawn <= 2 && elapsed < 8000;
         this.connected = false;
-        if (shortLived) {
+        if (startupFailure) {
           this.onStatus(
             "error",
             `xrdp closed the session (${reason || "disconnected"}). Check /var/log/xrdp-sesman.log and /etc/xrdp/startwm.sh on the VM.`
           );
         } else {
-          this.onStatus("disconnected", reason || "Session ended");
+          this.onStatus("disconnected", "Session signed out");
         }
         this.cleanupSessionOnly();
       },
@@ -382,13 +382,15 @@ export class RdpViewer {
       this.connected = false;
       if (this.session) {
         this.cleanupSessionOnly();
-        if (!wasConnected || elapsed < 8000 || this.framesDrawn === 0) {
+        if (ev.code === 4001) {
+          this.onStatus("disconnected", "Moved to new tab");
+        } else if (!wasConnected || (this.framesDrawn <= 2 && elapsed < 8000)) {
           this.onStatus(
             "error",
             `xrdp closed the connection (${ev.reason || `code ${ev.code}`}). Check server console logs and /var/log/xrdp-sesman.log.`
           );
         } else {
-          this.onStatus("disconnected", "Desktop connection closed");
+          this.onStatus("disconnected", "Session signed out");
         }
       }
     });
