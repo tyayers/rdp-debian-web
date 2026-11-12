@@ -62,16 +62,16 @@ install_or_update_system_tools() {
       ;;
   esac
 
-  # 1a. Base desktop packages: Plank, QTerminal, PCManFM-Qt, FeatherPad, LXQt menu data, GIO/GVFS & dconf
+  # 1a. Base desktop packages: Plank, QTerminal, PCManFM-Qt, FeatherPad, LXQt menu data, GIO/GVFS, dconf & GTK portal
   local missing_base=0
   local cmd
-  for cmd in curl gpg plank qterminal pcmanfm-qt featherpad lxqt-leave gio dconf; do
+  for cmd in curl gpg plank qterminal pcmanfm-qt featherpad lxqt-leave gio dconf dbus-update-activation-environment; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
     fi
   done
-  if [[ ! -f /etc/xdg/menus/lxqt-applications.menu ]]; then
+  if [[ ! -f /etc/xdg/menus/lxqt-applications.menu || ! -f /usr/share/xdg-desktop-portal/portals/gtk.portal ]]; then
     missing_base=1
   fi
   if [[ "$missing_base" -eq 1 ]]; then
@@ -79,7 +79,8 @@ install_or_update_system_tools() {
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
       ca-certificates curl gpg plank qterminal pcmanfm-qt featherpad \
-      lxqt-menu-data lxqt-session libglib2.0-bin gvfs dconf-cli
+      lxqt-menu-data lxqt-session libglib2.0-bin gvfs dconf-cli \
+      dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
 
   # 1b. VSCodium (codium)
@@ -328,15 +329,71 @@ Categories=System;
 EOF
   chmod 0644 /usr/share/applications/apigee-signout.desktop
 
-  # 1h. Session startup helper ensuring GVFS desktop shortcut trust, Plank dock order, and lxqt-panel
-  cat >/usr/local/bin/apigee-session-init <<'EOF'
+  # 1h. Fast Plank & LXQt session startup helpers (prevents 2-3 minute D-Bus/portal/bamf timeouts in xrdp)
+  cat >/usr/local/bin/apigee-start-plank <<'EOF'
 #!/usr/bin/env bash
-# Runs inside the user's active LXQt D-Bus/X11 session on login (and on reconnect)
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-LXQt}"
 export XDG_MENU_PREFIX="${XDG_MENU_PREFIX:-lxqt-}"
+export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
 
-apply_trust_and_dock() {
-  # 1. Mark any ~/Desktop/*.desktop files trusted in GVFS (LXQt libfm-qt uses 'metadata::trust')
+# 1. Propagate active X11 DISPLAY & XAUTHORITY into D-Bus and systemd --user BEFORE GTK/libbamf calls
+if [[ -n "${DISPLAY:-}" ]]; then
+  if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment --systemd DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null \
+      || dbus-update-activation-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user import-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
+    systemctl --user reset-failed bamfdaemon.service xdg-desktop-portal.service xdg-desktop-portal-gtk.service 2>/dev/null || true
+  fi
+fi
+
+# 2. Sync Plank dock-items ordering via dconf before Plank reads settings
+if command -v dconf >/dev/null 2>&1 && [[ -d "$HOME/.config/plank/dock1/launchers" ]]; then
+  items=()
+  for item in "$HOME/.config/plank/dock1/launchers"/*.dockitem; do
+    [[ -f "$item" ]] || continue
+    items+=("'$(basename -- "$item")'")
+  done
+  if [[ "${#items[@]}" -gt 0 ]]; then
+    joined="$(IFS=,; printf '%s' "${items[*]}")"
+    dconf write /net/launchpad/plank/docks/dock1/dock-items "[${joined}]" 2>/dev/null || true
+    dconf write /net/launchpad/plank/docks/dock1/show-dock-item "false" 2>/dev/null || true
+  fi
+fi
+
+# 3. Pre-start bamfdaemon directly on the live X11 DISPLAY so libbamf3 never blocks on systemd D-Bus activation
+if ! pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1; then
+  for bamf_bin in /usr/libexec/bamf/bamfdaemon /usr/lib/*/bamf/bamfdaemon; do
+    if [[ -x "$bamf_bin" ]]; then
+      nohup "$bamf_bin" </dev/null >/dev/null 2>&1 &
+      sleep 0.15
+      break
+    fi
+  done
+fi
+
+# 4. Launch Plank without xdg-desktop-portal or AT-SPI D-Bus probes (eliminates 120s portal timeout)
+if command -v plank >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
+  exec env NO_AT_BRIDGE=1 GTK_USE_PORTAL=0 GDK_DEBUG=no-portals GIO_USE_PORTALS=0 plank
+fi
+EOF
+  chmod 0755 /usr/local/bin/apigee-start-plank
+
+  cat >/usr/local/bin/apigee-session-init <<'EOF'
+#!/usr/bin/env bash
+# Runs inside the user's active LXQt D-Bus/X11 session on login
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-LXQt}"
+export XDG_MENU_PREFIX="${XDG_MENU_PREFIX:-lxqt-}"
+export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+
+if [[ -n "${DISPLAY:-}" ]] && command -v dbus-update-activation-environment >/dev/null 2>&1; then
+  dbus-update-activation-environment --systemd DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null \
+    || dbus-update-activation-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
+fi
+
+apply_trust() {
+  # Mark any ~/Desktop/*.desktop files trusted in GVFS (LXQt libfm-qt uses 'metadata::trust')
   if command -v gio >/dev/null 2>&1 && [[ -d "$HOME/Desktop" ]]; then
     for f in "$HOME/Desktop"/*.desktop; do
       [[ -f "$f" ]] || continue
@@ -344,38 +401,24 @@ apply_trust_and_dock() {
       gio set -t string "$f" metadata::trusted true 2>/dev/null || true
     done
   fi
-
-  # 2. Sync Plank dock-items ordering via dconf if available
-  if command -v dconf >/dev/null 2>&1 && [[ -d "$HOME/.config/plank/dock1/launchers" ]]; then
-    local items=() item joined
-    for item in "$HOME/.config/plank/dock1/launchers"/*.dockitem; do
-      [[ -f "$item" ]] || continue
-      items+=("'$(basename -- "$item")'")
-    done
-    if [[ "${#items[@]}" -gt 0 ]]; then
-      joined="$(IFS=,; printf '%s' "${items[*]}")"
-      dconf write /net/launchpad/plank/docks/dock1/dock-items "[${joined}]" 2>/dev/null || true
-      dconf write /net/launchpad/plank/docks/dock1/show-dock-item "false" 2>/dev/null || true
-    fi
-  fi
 }
 
 ensure_panel_and_dock_running() {
   if command -v lxqt-panel >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
     nohup lxqt-panel </dev/null >/dev/null 2>&1 &
   fi
-  if command -v plank >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
-    nohup plank </dev/null >/dev/null 2>&1 &
+  if [[ -x /usr/local/bin/apigee-start-plank ]] && ! pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
+    nohup /usr/local/bin/apigee-start-plank </dev/null >/dev/null 2>&1 &
   fi
 }
 
-apply_trust_and_dock
+apply_trust
 if [[ "${1:-}" == "--Immediate" ]]; then
   ensure_panel_and_dock_running
 else
   (
-    sleep 2
-    apply_trust_and_dock
+    sleep 1
+    apply_trust
     ensure_panel_and_dock_running
   ) </dev/null >/dev/null 2>&1 &
 fi
@@ -513,7 +556,7 @@ list_user_xrdp_pids() {
     comm=""
     read -r comm <"/proc/$pid/comm" 2>/dev/null || true
     case "$comm" in
-      lxqt-session|lxqt-panel|pcmanfm-qt|plank|openbox|xfwm4|xrdp-chansrv|Xorg|Xvnc)
+      lxqt-session|lxqt-panel|pcmanfm-qt|plank|bamfdaemon|xdg-desktop-por|openbox|xfwm4|xrdp-chansrv|Xorg|Xvnc)
         printf '%s\n' "$pid"
         continue
         ;;
@@ -880,14 +923,25 @@ EOF
 update_pcmanfm_profile "lxqt"
 update_pcmanfm_profile "default"
 
-# 4. Ensure Plank & Session Init helper are configured in XDG autostart (~/.config/autostart/)
+# 4. Configure XDG portal backend & Plank/Session-Init XDG autostart (~/.config/autostart/)
+PORTALS_CONF="$HOMEDIR/.config/xdg-desktop-portal/portals.conf"
+write_user_file "$PORTALS_CONF" 0644 <<'EOF' || true
+[preferred]
+default=gtk
+EOF
+
+PLANK_START_CMD="env NO_AT_BRIDGE=1 GTK_USE_PORTAL=0 GDK_DEBUG=no-portals GIO_USE_PORTALS=0 plank"
+if [[ -x /usr/local/bin/apigee-start-plank ]]; then
+  PLANK_START_CMD="/usr/local/bin/apigee-start-plank"
+fi
+
 PLANK_AUTOSTART="$HOMEDIR/.config/autostart/plank.desktop"
-write_user_file "$PLANK_AUTOSTART" 0644 <<'EOF' || true
+write_user_file "$PLANK_AUTOSTART" 0644 <<EOF || true
 [Desktop Entry]
 Type=Application
 Name=Plank
 Comment=Dock
-Exec=plank
+Exec=$PLANK_START_CMD
 Icon=plank
 Terminal=false
 Hidden=false

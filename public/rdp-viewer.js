@@ -151,6 +151,10 @@ export class RdpViewer {
     this.boundContextMenu = (e) => e.preventDefault();
     this.boundBlur = () => this.releaseAllInputs();
     this.boundPaste = (e) => this.handleBrowserPaste(e);
+    this.boundWindowResize = () => {
+      if (!this.connected) return;
+      this.scheduleViewportResize();
+    };
 
     this.attachInputListeners();
   }
@@ -165,6 +169,7 @@ export class RdpViewer {
     this.canvas.addEventListener("contextmenu", this.boundContextMenu);
     this.canvas.addEventListener("blur", this.boundBlur);
     window.addEventListener("blur", this.boundBlur);
+    window.addEventListener("resize", this.boundWindowResize);
     document.addEventListener("paste", this.boundPaste);
 
     this.resizeObserver = new ResizeObserver(() => {
@@ -174,20 +179,42 @@ export class RdpViewer {
     this.resizeObserver.observe(this.viewport);
   }
 
-  scheduleViewportResize(delayMs = 350) {
+  scheduleViewportResize(delayMs = 600) {
     clearTimeout(this.resizeTimer);
     this.resizeTimer = setTimeout(() => {
-      this.requestViewportResize();
+      requestAnimationFrame(() => {
+        this.requestViewportResize();
+      });
     }, delayMs);
   }
 
   computeTargetDimensions() {
     const rect = this.viewport.getBoundingClientRect();
-    const rawW = Math.max(320, Math.floor(rect.width || 1280));
-    const rawH = Math.max(240, Math.floor(rect.height || 800));
+    let measuredW = Math.floor(Math.max(rect.width || 0, this.viewport.clientWidth || 0));
+    let measuredH = Math.floor(Math.max(rect.height || 0, this.viewport.clientHeight || 0));
+    const usedFallback = measuredW < 200 || measuredH < 200;
+
+    if (usedFallback) {
+      const isFullscreen = document.fullscreenElement === this.viewport;
+      const nav = document.getElementById("nav-rail");
+      const navW =
+        !isFullscreen && nav && !nav.hidden && window.innerWidth > 760
+          ? nav.offsetWidth || 248
+          : 0;
+      const chromeH = isFullscreen ? 0 : 94; // 52px topbar + 42px session-bar
+      if (measuredW < 200) {
+        measuredW = Math.floor((window.innerWidth || 1280) - navW);
+      }
+      if (measuredH < 200) {
+        measuredH = Math.floor((window.innerHeight || 800) - chromeH);
+      }
+    }
+
+    const rawW = Math.max(320, measuredW);
+    const rawH = Math.max(240, measuredH);
     const width = Math.min(4096, rawW & ~1);
     const height = Math.min(4096, rawH);
-    return { width, height };
+    return { width, height, rectWidth: Math.round(rect.width), rectHeight: Math.round(rect.height) };
   }
 
   sendClientLog(message) {
@@ -506,8 +533,20 @@ export class RdpViewer {
 
   requestViewportResize() {
     if (!this.connected || !this.session) return;
-    const { width, height } = this.computeTargetDimensions();
+    if (document.visibilityState === "hidden") return;
+
+    const { width, height, rectWidth, rectHeight } = this.computeTargetDimensions();
+    if (rectWidth < 200 || rectHeight < 200) {
+      // Wait for transient layout / fullscreen / sidebar animation to finish settling
+      if ((window.innerWidth || 0) >= 400 && (window.innerHeight || 0) >= 300) {
+        this.scheduleViewportResize(300);
+        return;
+      }
+    }
     if (width === this.canvas.width && height === this.canvas.height) return;
+    this.sendClientLog(
+      `Viewport resize settled -> ${width}x${height} (viewport=${rectWidth}x${rectHeight}, window=${window.innerWidth}x${window.innerHeight})`
+    );
     this.session.resize(width, height);
   }
 
@@ -559,6 +598,7 @@ export class RdpViewer {
     this.canvas.removeEventListener("contextmenu", this.boundContextMenu);
     this.canvas.removeEventListener("blur", this.boundBlur);
     window.removeEventListener("blur", this.boundBlur);
+    window.removeEventListener("resize", this.boundWindowResize);
     document.removeEventListener("paste", this.boundPaste);
   }
 }

@@ -564,6 +564,13 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     const wallpaperStat = await fs.stat(userWallpaperPath);
 
     expect(await Bun.file(path.join(autostartDir, "lxqt-panel.desktop")).exists()).toBe(false);
+    const portalsConf = await fs.readFile(
+      path.join(freshHome, ".config", "xdg-desktop-portal", "portals.conf"),
+      "utf8"
+    );
+    expect(portalsConf).toContain("default=gtk");
+    const plankAutostart = await fs.readFile(path.join(autostartDir, "plank.desktop"), "utf8");
+    expect(plankAutostart).toMatch(/Exec=(?:\/usr\/local\/bin\/apigee-start-plank|env NO_AT_BRIDGE=1 GTK_USE_PORTAL=0)/);
     expect(firstPass).toContain("plugins=mainmenu, taskbar, spacer, kbindicator, signout");
     expect(firstPass).toContain("menu_file=/etc/xdg/menus/");
     expect(firstPass).toContain("spaceType=invisible");
