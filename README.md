@@ -10,6 +10,9 @@ Browser-based `xrdp` workstation portal authenticated via **Google Cloud IAP** (
 2. **Automatic Linux User & Password Management (`./users.yaml`)**:
    - Checks `/etc/passwd` on the VM; if the Linux user does not exist yet, creates it automatically (`useradd -m -s /bin/bash`).
    - Generates a random password for the user, stores all usernames and generated passwords in **`./users.yaml`** (in the directory where the service is started, `chmod 600`), syncs the Linux password via `chpasswd`, and **automatically connects** the browser RDP session without any password prompt.
+3. **Live Host VM Telemetry & Capacity Guard (`src/host-metrics.ts`)**:
+   - Continuously samples host VM `/proc/stat` and `/proc/meminfo` (exposed on `GET /api/metrics` and displayed live in the header bar and sidebar).
+   - If the host VM's **5-minute average CPU utilization is ≥ 70%** (configurable via `MAX_CONNECT_CPU_AVG_5M`), new connections are refused with a clear message instructing the user that no free resources are available and to contact the demo owner for assistance.
 
 ## Getting Started (Debian 13 VM)
 

@@ -401,7 +401,10 @@ export class VmUserManager {
 
   private async resolveOnConnectAssets(): Promise<{ scriptPath: string; wallpaperPath: string }> {
     let scriptPath = this.config.onConnectScript!;
-    if (!(await Bun.file(scriptPath).exists())) {
+    const preferEmbedded =
+      this.config.isCompiledBinary && !this.config.hasExplicitOnConnectOverride;
+
+    if (preferEmbedded || !(await Bun.file(scriptPath).exists())) {
       await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
       const fallbackPath = path.join(this.config.dataDir, "on-connect.default.sh");
       const embeddedText = await Bun.file(EMBEDDED_ON_CONNECT_SCRIPT).text();
@@ -410,7 +413,7 @@ export class VmUserManager {
     }
 
     let wallpaperPath = path.join(this.config.publicDir, "wallpaper.jpg");
-    if (!(await Bun.file(wallpaperPath).exists())) {
+    if (preferEmbedded || !(await Bun.file(wallpaperPath).exists())) {
       await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o755 });
       const fallbackWallpaper = path.join(this.config.dataDir, "wallpaper.jpg");
       const bytes = await Bun.file(EMBEDDED_WALLPAPER_JPG).arrayBuffer();

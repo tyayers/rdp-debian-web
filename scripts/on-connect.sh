@@ -33,6 +33,48 @@ find_existing_desktop() {
   printf '%s' "${1:-}"
 }
 
+resolve_or_create_desktop() {
+  local fallback_slug="$1"
+  local fallback_title="$2"
+  local fallback_exec="$3"
+  local fallback_icon="$4"
+  shift 4
+
+  local cand
+  for cand in "$@"; do
+    if [[ -f "$APPS_DIR/$cand" ]]; then
+      printf '%s' "$APPS_DIR/$cand"
+      return 0
+    fi
+  done
+
+  # Search installed .desktop files by Exec= binary name in case package renamed its .desktop ID
+  local bin_name="${fallback_exec%% *}"
+  bin_name="${bin_name##*/}"
+  if [[ -n "$bin_name" && -d "$APPS_DIR" ]]; then
+    local matched
+    matched="$(grep -lE "^Exec=([^[:space:]]*/)?${bin_name}([[:space:]]|\$)" "$APPS_DIR"/*.desktop 2>/dev/null | head -n1 || true)"
+    if [[ -n "$matched" && -f "$matched" ]]; then
+      printf '%s' "$matched"
+      return 0
+    fi
+  fi
+
+  # Guaranteed fallback .desktop in user applications dir so Plank never drops an icon
+  local fallback_path="$USER_APPS_DIR/apigee-${fallback_slug}.desktop"
+  write_user_file "$fallback_path" 0644 <<EOF || true
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=$fallback_title
+Exec=$fallback_exec
+Icon=$fallback_icon
+Terminal=false
+StartupNotify=true
+EOF
+  printf '%s' "$fallback_path"
+}
+
 # ---------------------------------------------------------------------------
 # 1. System-wide tool installation (installed ONCE on the VM for all users)
 # ---------------------------------------------------------------------------
@@ -329,12 +371,47 @@ Categories=System;
 EOF
   chmod 0644 /usr/share/applications/apigee-signout.desktop
 
-  # 1h. Fast Plank & LXQt session startup helpers (prevents 2-3 minute D-Bus/portal/bamf timeouts in xrdp)
+  # 1h. System-wide locked dconf database for Plank so every user gets identical dock settings & icons
+  if command -v dconf >/dev/null 2>&1; then
+    install -d -m 0755 /etc/dconf/profile /etc/dconf/db/local.d /etc/dconf/db/local.d/locks
+    cat >/etc/dconf/profile/user <<'EOF'
+user-db:user
+system-db:local
+EOF
+    chmod 0644 /etc/dconf/profile/user
+
+    cat >/etc/dconf/db/local.d/00-apigee-plank <<'EOF'
+[net/launchpad/plank/docks/dock1]
+dock-items=['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem']
+show-dock-item=false
+pinned-only=false
+hide-mode='none'
+position='bottom'
+alignment='center'
+items-alignment='center'
+EOF
+    chmod 0644 /etc/dconf/db/local.d/00-apigee-plank
+
+    cat >/etc/dconf/db/local.d/locks/00-apigee-plank <<'EOF'
+/net/launchpad/plank/docks/dock1/dock-items
+/net/launchpad/plank/docks/dock1/show-dock-item
+EOF
+    chmod 0644 /etc/dconf/db/local.d/locks/00-apigee-plank
+    dconf update 2>/dev/null || true
+  fi
+
+  # 1i. Fast Plank & LXQt session startup helpers (prevents 2-3 minute D-Bus/portal/bamf timeouts in xrdp)
   cat >/usr/local/bin/apigee-start-plank <<'EOF'
 #!/usr/bin/env bash
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-LXQt}"
 export XDG_MENU_PREFIX="${XDG_MENU_PREFIX:-lxqt-}"
 export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+
+if command -v flock >/dev/null 2>&1; then
+  LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/apigee-plank-$(id -u).lock"
+  exec 8>"$LOCK_FILE"
+  flock -n 8 || exit 0
+fi
 
 # 1. Propagate active X11 DISPLAY & XAUTHORITY into D-Bus and systemd --user BEFORE GTK/libbamf calls
 if [[ -n "${DISPLAY:-}" ]]; then
@@ -348,18 +425,12 @@ if [[ -n "${DISPLAY:-}" ]]; then
   fi
 fi
 
-# 2. Sync Plank dock-items ordering via dconf before Plank reads settings
-if command -v dconf >/dev/null 2>&1 && [[ -d "$HOME/.config/plank/dock1/launchers" ]]; then
-  items=()
-  for item in "$HOME/.config/plank/dock1/launchers"/*.dockitem; do
-    [[ -f "$item" ]] || continue
-    items+=("'$(basename -- "$item")'")
-  done
-  if [[ "${#items[@]}" -gt 0 ]]; then
-    joined="$(IFS=,; printf '%s' "${items[*]}")"
-    dconf write /net/launchpad/plank/docks/dock1/dock-items "[${joined}]" 2>/dev/null || true
-    dconf write /net/launchpad/plank/docks/dock1/show-dock-item "false" 2>/dev/null || true
-  fi
+# 2. Enforce exact 6-item Plank dock ordering via dconf before Plank reads settings
+if command -v dconf >/dev/null 2>&1; then
+  dconf write /net/launchpad/plank/docks/dock1/dock-items \
+    "['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem']" 2>/dev/null || true
+  dconf write /net/launchpad/plank/docks/dock1/show-dock-item "false" 2>/dev/null || true
+  dconf write /net/launchpad/plank/docks/dock1/pinned-only "false" 2>/dev/null || true
 fi
 
 # 3. Pre-start bamfdaemon directly on the live X11 DISPLAY so libbamf3 never blocks on systemd D-Bus activation
@@ -986,22 +1057,27 @@ Categories=System;FileManager;
 EOF
 fi
 
-TERM_DESKTOP="$(find_existing_desktop qterminal.desktop lxterminal.desktop xfce4-terminal.desktop xterm.desktop)"
-EDITOR_DESKTOP="$(find_existing_desktop featherpad.desktop org.featherpad.FeatherPad.desktop mousepad.desktop org.gnome.TextEditor.desktop)"
-CHROME_DESKTOP="$(find_existing_desktop google-chrome.desktop chromium.desktop)"
-CODIUM_DESKTOP="codium.desktop"
-ANTIGRAVITY_APP_DESKTOP="antigravity.desktop"
+TERM_DESKTOP_PATH="$(resolve_or_create_desktop "terminal" "QTerminal" "qterminal" "utilities-terminal" \
+  qterminal.desktop org.lxqt.QTerminal.desktop org.lxqt.qterminal.desktop lxterminal.desktop xfce4-terminal.desktop xterm.desktop)"
+EDITOR_DESKTOP_PATH="$(resolve_or_create_desktop "text-editor" "FeatherPad" "featherpad %F" "featherpad" \
+  featherpad.desktop org.featherpad.FeatherPad.desktop mousepad.desktop org.gnome.TextEditor.desktop)"
+CHROME_DESKTOP_PATH="$(resolve_or_create_desktop "chrome" "Google Chrome" "google-chrome-stable %U" "google-chrome" \
+  google-chrome.desktop google-chrome-stable.desktop chromium.desktop)"
+CODIUM_DESKTOP_PATH="$(resolve_or_create_desktop "codium" "VSCodium" "codium %F" "vscodium" \
+  codium.desktop)"
+ANTIGRAVITY_DESKTOP_PATH="$(resolve_or_create_desktop "antigravity" "Antigravity" "/opt/antigravity/antigravity %U" "antigravity" \
+  antigravity.desktop)"
 
 # Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity (remove old IDE/CLI shortcuts).
 # Written as Type=Link shortcuts targeting /usr/share/applications/*.desktop: in LXQt libfm-qt
 # (FileInfo::isExecutableType), Type=Link entries targeting /usr/share/* are inherently trusted on disk
 # without needing GVFS metadata, avoiding both the '!' untrusted emblem and symlink arrow emblem.
 rm -f -- "$DESKTOP_DIR/antigravity-ide.desktop" "$DESKTOP_DIR/antigravity-cli.desktop"
-DESKTOP_SHORTCUTS=(
-  "$TERM_DESKTOP"
-  "$CHROME_DESKTOP"
-  "$CODIUM_DESKTOP"
-  "$ANTIGRAVITY_APP_DESKTOP"
+DESKTOP_SHORTCUT_SOURCES=(
+  "$TERM_DESKTOP_PATH"
+  "$CHROME_DESKTOP_PATH"
+  "$CODIUM_DESKTOP_PATH"
+  "$ANTIGRAVITY_DESKTOP_PATH"
 )
 
 write_desktop_shortcut() {
@@ -1040,9 +1116,9 @@ write_desktop_shortcut() {
   } | write_user_file "$dest_desktop" 0644 || true
 }
 
-for desktop_file in "${DESKTOP_SHORTCUTS[@]}"; do
-  [[ -z "$desktop_file" ]] && continue
-  write_desktop_shortcut "$APPS_DIR/$desktop_file" "$DESKTOP_DIR/$desktop_file"
+for src_desktop in "${DESKTOP_SHORTCUT_SOURCES[@]}"; do
+  [[ -z "$src_desktop" || ! -f "$src_desktop" ]] && continue
+  write_desktop_shortcut "$src_desktop" "$DESKTOP_DIR/$(basename -- "$src_desktop")"
 done
 
 # Exact Plank dock items: Home, Chrome, VSCodium, Terminal, Text Editor, Antigravity
@@ -1069,11 +1145,11 @@ EOF
 }
 
 add_plank_item 1 "home" "$HOME_LAUNCHER_PATH"
-add_plank_item 2 "chrome" "$APPS_DIR/$CHROME_DESKTOP"
-add_plank_item 3 "codium" "$APPS_DIR/$CODIUM_DESKTOP"
-add_plank_item 4 "terminal" "$APPS_DIR/$TERM_DESKTOP"
-add_plank_item 5 "text-editor" "$APPS_DIR/$EDITOR_DESKTOP"
-add_plank_item 6 "antigravity" "$APPS_DIR/$ANTIGRAVITY_APP_DESKTOP"
+add_plank_item 2 "chrome" "$CHROME_DESKTOP_PATH"
+add_plank_item 3 "codium" "$CODIUM_DESKTOP_PATH"
+add_plank_item 4 "terminal" "$TERM_DESKTOP_PATH"
+add_plank_item 5 "text-editor" "$EDITOR_DESKTOP_PATH"
+add_plank_item 6 "antigravity" "$ANTIGRAVITY_DESKTOP_PATH"
 
 # Remove ALL other .dockitem files (including Plank's unnumbered first-run defaults like pcmanfm-qt/clock)
 for existing_item in "$PLANK_LAUNCHERS_DIR"/*.dockitem; do
@@ -1084,6 +1160,28 @@ for existing_item in "$PLANK_LAUNCHERS_DIR"/*.dockitem; do
     PLANK_CHANGED=1
   fi
 done
+
+# Pre-compile per-user ~/.config/dconf/user offline before xrdp starts so even on first login
+# Plank immediately sees all 6 dock-items without running make_default_items()
+if command -v dconf >/dev/null 2>&1; then
+  ensure_user_dir "$HOMEDIR/.config/dconf"
+  DCONF_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/apigee-dconf.XXXXXX")"
+  mkdir -p -- "$DCONF_STAGE/src.d"
+  cat >"$DCONF_STAGE/src.d/00-plank" <<'EOF'
+[net/launchpad/plank/docks/dock1]
+dock-items=['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem']
+show-dock-item=false
+pinned-only=false
+hide-mode='none'
+position='bottom'
+alignment='center'
+items-alignment='center'
+EOF
+  if dconf compile "$DCONF_STAGE/user" "$DCONF_STAGE/src.d" 2>/dev/null && [[ -s "$DCONF_STAGE/user" ]]; then
+    write_user_file "$HOMEDIR/.config/dconf/user" 0644 <"$DCONF_STAGE/user" || true
+  fi
+  rm -rf -- "$DCONF_STAGE"
+fi
 
 # Keep ~/.local/bin/agy aligned with system /usr/local/bin/agy if user had an older local copy
 if [[ -x /usr/local/bin/agy && -e "$HOMEDIR/.local/bin/agy" && ! -L "$HOMEDIR/.local/bin/agy" ]]; then

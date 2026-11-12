@@ -61,7 +61,6 @@ struct SharedClipState {
 #[derive(Debug, Default)]
 struct DisplayControlState {
     ready: bool,
-    max_monitor_area: Option<u64>,
     just_became_ready: bool,
 }
 
@@ -240,7 +239,7 @@ pub struct RdpSession {
     blit_buf: Vec<u8>,
     clip_state: Arc<Mutex<SharedClipState>>,
     disp_state: Arc<Mutex<DisplayControlState>>,
-    pending_resize: Option<(u32, u32)>,
+    pending_resize: Option<(u32, u32, bool)>,
     last_requested_resize: Option<(u32, u32)>,
     rendered_frames: u64,
     cb: HostCallbacks,
@@ -320,10 +319,13 @@ impl RdpSession {
         let cliprdr = CliprdrClient::new(clip_backend);
 
         let disp_state_cb = Arc::clone(&disp_state);
-        let dvc = DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(move |caps| {
+        let dvc = DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(move |_caps| {
+            // Note: ironrdp-displaycontrol 0.8.0's DisplayControlClient::process decodes
+            // DisplayControlCapabilities at byte 0 without skipping the 8-byte DISPLAYCONTROL_HEADER,
+            // which misreads xrdp's [Type=5, Length=20, MaxNumMonitors=16] header as max_monitor_area=1600!
+            // Ignore _caps.max_monitor_area() and rely on explicit 320..=4096 / 240..=4096 bounds.
             if let Ok(mut guard) = disp_state_cb.lock() {
                 guard.ready = true;
-                guard.max_monitor_area = Some(caps.max_monitor_area());
                 guard.just_became_ready = true;
             }
             Ok(Vec::new())
@@ -487,8 +489,15 @@ impl RdpSession {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        let (adj_w, adj_h) = self.normalize_resize_dims(width, height);
-        self.pending_resize = Some((adj_w, adj_h));
+        let (adj_w, adj_h) = normalize_resize_dims(width, height);
+        self.pending_resize = Some((adj_w, adj_h, false));
+        self.flush_pending_resize();
+    }
+
+    pub fn recalibrate(&mut self, width: u32, height: u32) {
+        let (adj_w, adj_h) = normalize_resize_dims(width, height);
+        self.last_requested_resize = None;
+        self.pending_resize = Some((adj_w, adj_h, true));
         self.flush_pending_resize();
     }
 
@@ -537,78 +546,51 @@ impl RdpSession {
             .call1(&JsValue::NULL, &JsValue::from_str(reason));
     }
 
-    fn normalize_resize_dims(&self, width: u32, height: u32) -> (u32, u32) {
-        let clamped_w = width.clamp(320, 4096);
-        let clamped_h = height.clamp(240, 4096);
-        let (mut adj_w, mut adj_h) = MonitorLayoutEntry::adjust_display_size(clamped_w, clamped_h);
-
-        let max_area = self
-            .disp_state
-            .lock()
-            .ok()
-            .and_then(|g| g.max_monitor_area)
-            .unwrap_or(0);
-
-        if max_area > 0 {
-            let area = u64::from(adj_w) * u64::from(adj_h);
-            if area > max_area {
-                let scale = (max_area as f64 / area as f64).sqrt();
-                let scaled_w = ((adj_w as f64) * scale).floor() as u32;
-                let scaled_h = ((adj_h as f64) * scale).floor() as u32;
-                (adj_w, adj_h) = MonitorLayoutEntry::adjust_display_size(
-                    scaled_w.max(320),
-                    scaled_h.max(240),
-                );
-            }
-        }
-
-        (adj_w, adj_h)
-    }
-
     fn flush_pending_resize(&mut self) {
-        let mut became_ready_msg: Option<u64> = None;
+        let mut became_ready = false;
         let is_ready = if let Ok(mut guard) = self.disp_state.lock() {
             if guard.just_became_ready {
                 guard.just_became_ready = false;
-                became_ready_msg = guard.max_monitor_area;
+                became_ready = true;
             }
             guard.ready
         } else {
             false
         };
 
-        if let Some(max_area) = became_ready_msg {
-            self.emit_log(&format!(
-                "DisplayControl dynamic channel ready (max_monitor_area={max_area})"
-            ));
+        if became_ready {
+            self.emit_log("DisplayControl dynamic channel ready");
         }
 
-        let Some((req_w, req_h)) = self.pending_resize else {
+        let Some((req_w, req_h, force)) = self.pending_resize else {
             return;
         };
 
-        let (adj_w, adj_h) = self.normalize_resize_dims(req_w, req_h);
+        let (adj_w, adj_h) = normalize_resize_dims(req_w, req_h);
 
         // Wait until ActiveStage is active and DisplayControl has received server capabilities
         if !is_ready {
-            self.pending_resize = Some((adj_w, adj_h));
+            self.pending_resize = Some((adj_w, adj_h, force));
             return;
         }
 
         let encode_result: Option<Result<Vec<u8>, String>> = {
             let Stage::Active { stage, .. } = &mut self.stage else {
                 // Keep pending_resize queued until Connecting / Reactivating finishes
-                self.pending_resize = Some((adj_w, adj_h));
+                self.pending_resize = Some((adj_w, adj_h, force));
                 return;
             };
 
-            if adj_w == u32::from(self.image.width()) && adj_h == u32::from(self.image.height()) {
+            if !force
+                && adj_w == u32::from(self.image.width())
+                && adj_h == u32::from(self.image.height())
+            {
                 self.pending_resize = None;
                 self.last_requested_resize = None;
                 return;
             }
 
-            if self.last_requested_resize == Some((adj_w, adj_h)) {
+            if !force && self.last_requested_resize == Some((adj_w, adj_h)) {
                 self.pending_resize = None;
                 return;
             }
@@ -621,7 +603,7 @@ impl RdpSession {
                 });
 
             let Some(channel_id) = channel_id_opt else {
-                self.pending_resize = Some((adj_w, adj_h));
+                self.pending_resize = Some((adj_w, adj_h, force));
                 return;
             };
 
@@ -1391,6 +1373,12 @@ fn classify_x224_frame(frame: &[u8], io_channel_id: u16) -> X224FrameKind {
     }
 }
 
+fn normalize_resize_dims(width: u32, height: u32) -> (u32, u32) {
+    let clamped_w = width.clamp(320, 4096);
+    let clamped_h = height.clamp(240, 4096);
+    MonitorLayoutEntry::adjust_display_size(clamped_w, clamped_h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1461,9 +1449,11 @@ mod tests {
 
     #[test]
     fn narrow_window_layout_preserves_landscape_orientation() {
-        let (w, h) = MonitorLayoutEntry::adjust_display_size(801, 960);
-        assert_eq!((w, h), (800, 960));
-        let entry = MonitorLayoutEntry::new_primary(w, h)
+        let (w, h) = normalize_resize_dims(1673, 986);
+        assert_eq!((w, h), (1672, 986));
+        let (w2, h2) = normalize_resize_dims(801, 960);
+        assert_eq!((w2, h2), (800, 960));
+        let entry = MonitorLayoutEntry::new_primary(w2, h2)
             .unwrap()
             .with_orientation(MonitorOrientation::Landscape);
         assert_eq!(entry.orientation(), Some(MonitorOrientation::Landscape));

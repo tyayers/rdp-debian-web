@@ -7,6 +7,7 @@ import path from "node:path";
 import tls from "node:tls";
 import { deriveLinuxUsername, parseUserIdentity } from "../src/auth.ts";
 import { loadConfig } from "../src/config.ts";
+import { HostMetricsMonitor, RESOURCE_BUSY_MESSAGE, type HostMetricsProvider } from "../src/host-metrics.ts";
 import { createAppServer } from "../src/server.ts";
 import { parseUsersYaml, VmUserManager, type SystemUserAdapter } from "../src/vm-users.ts";
 
@@ -48,6 +49,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
   let usersYamlPath = "";
   let executedCommands: Array<{ argv: string[]; stdin?: string }> = [];
   let terminatedEvents: Array<{ username: string; reason: "pre-connect" | "disconnect" }> = [];
+  let simulatedCpu5m = 18.5;
   let mockRdpServer: net.Server;
   let mockRdpPort = 0;
   let receivedMcsConnectInitial: Buffer | null = null;
@@ -135,6 +137,21 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       },
     };
 
+    const testMetricsProvider: HostMetricsProvider = {
+      getSnapshot: () => ({
+        cpuCurrentPercent: simulatedCpu5m,
+        cpuAvg5mPercent: simulatedCpu5m,
+        cpuCores: 4,
+        memUsedBytes: 3 * 1024 * 1024 * 1024,
+        memTotalBytes: 8 * 1024 * 1024 * 1024,
+        memUsedPercent: 37.5,
+        maxCpuAvg5mPercent: 70,
+        overloaded: simulatedCpu5m >= 70,
+        updatedAt: new Date().toISOString(),
+      }),
+      stop: () => {},
+    };
+
     app = createAppServer(
       {
         host: "127.0.0.1",
@@ -145,7 +162,8 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
         usersFile: usersYamlPath,
         dataDir: path.join(tmpDir, "data"),
       },
-      systemAdapter
+      systemAdapter,
+      testMetricsProvider
     );
     baseUrl = `http://127.0.0.1:${app.server.port}`;
   });
@@ -621,5 +639,91 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       }
     );
     expect(await signoutProc.exited).toBe(0);
+
+    // Verify all 6 Plank dock items are STILL created deterministically even if system .desktop names differ/are absent
+    const emptyAppsDir = path.join(tmpDir, "empty-applications");
+    await fs.mkdir(emptyAppsDir, { recursive: true });
+    const fallbackHome = path.join(tmpDir, "home-bob");
+    await mgr.runOnConnectHook("bob", {
+      homeDirOverride: fallbackHome,
+      envOverrides: {
+        ON_CONNECT_APPS_DIR: emptyAppsDir,
+        ON_CONNECT_SKIP_INSTALL: "1",
+        ON_CONNECT_SKIP_PROCESS_CHECK: "1",
+      },
+    });
+    const bobPlankDir = path.join(fallbackHome, ".config", "plank", "dock1", "launchers");
+    for (const [dockFile] of expectedDockItems) {
+      expect(await Bun.file(path.join(bobPlankDir, dockFile)).exists()).toBe(true);
+    }
+  });
+
+  test("serves continuous host VM CPU/memory telemetry and refuses connections when 5m average CPU >= 70%", async () => {
+    // Real HostMetricsMonitor reads /proc/stat & /proc/meminfo cleanly
+    const realMonitor = new HostMetricsMonitor(70);
+    const realSnap = realMonitor.getSnapshot();
+    realMonitor.stop();
+    expect(realSnap.memTotalBytes).toBeGreaterThan(0);
+    expect(realSnap.cpuCores).toBeGreaterThanOrEqual(1);
+    expect(realSnap.cpuAvg5mPercent).toBeGreaterThanOrEqual(0);
+    expect(realSnap.cpuAvg5mPercent).toBeLessThanOrEqual(100);
+
+    // 1. Under normal load (< 70%), /api/metrics reports overloaded=false
+    simulatedCpu5m = 24.5;
+    const metricsRes = await (await fetch(`${baseUrl}/api/metrics`)).json();
+    expect(metricsRes.metrics.cpuAvg5mPercent).toBe(24.5);
+    expect(metricsRes.metrics.memUsedPercent).toBe(37.5);
+    expect(metricsRes.metrics.overloaded).toBe(false);
+
+    const meRes = await fetch(`${baseUrl}/api/me?user=overloadtest@example.com`);
+    const cookie = meRes.headers.get("set-cookie")!.split(";")[0]!;
+    const meJson = await meRes.json();
+
+    // 2. At exact threshold (70.0%), POST /api/vm-user/ensure refuses with 503 + RESOURCE_BUSY message
+    simulatedCpu5m = 70.0;
+    const ensureBusyRes = await fetch(
+      `${baseUrl}/api/vm-user/ensure?user=overloadtest@example.com`,
+      {
+        method: "POST",
+        headers: {
+          Cookie: cookie,
+          "X-CSRF-Token": meJson.csrfToken,
+        },
+      }
+    );
+    expect(ensureBusyRes.status).toBe(503);
+    const ensureBusy = await ensureBusyRes.json();
+    expect(ensureBusy.code).toBe("RESOURCE_BUSY");
+    expect(ensureBusy.error).toBe(RESOURCE_BUSY_MESSAGE);
+
+    // 3. Above threshold (83.2%), direct WebSocket connection also refuses with FRAME_ERROR (0xff)
+    simulatedCpu5m = 83.2;
+    const x224RequestFrame = new Uint8Array([
+      0x01,
+      0x03, 0x00, 0x00, 0x13,
+      0x0e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x01, 0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00,
+    ]);
+    const wsUrl =
+      baseUrl.replace("http://", "ws://") + "/api/rdp/ws?user=overloadtest%40example.com";
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+
+    const errMessage = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Timed out waiting for overload error")), 3000);
+      ws.addEventListener("open", () => ws.send(x224RequestFrame));
+      ws.addEventListener("message", (ev) => {
+        const bytes = new Uint8Array(ev.data as ArrayBuffer);
+        if (bytes[0] === 0xff) {
+          clearTimeout(timer);
+          resolve(new TextDecoder().decode(bytes.subarray(1)));
+        }
+      });
+      ws.addEventListener("error", () => reject(new Error("WebSocket error")));
+    });
+
+    expect(errMessage).toBe(RESOURCE_BUSY_MESSAGE);
+    ws.close();
+    simulatedCpu5m = 18.5;
   });
 });

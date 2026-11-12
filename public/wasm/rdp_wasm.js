@@ -111,6 +111,13 @@ export class RdpSession {
             throw takeFromExternrefTable0(ret[0]);
         }
     }
+    /**
+     * @param {number} width
+     * @param {number} height
+     */
+    recalibrate(width, height) {
+        wasm.rdpsession_recalibrate(this.__wbg_ptr, width, height);
+    }
     release_all() {
         wasm.rdpsession_release_all(this.__wbg_ptr);
     }

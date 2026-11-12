@@ -3,6 +3,7 @@ import tls from "node:tls";
 import type { ServerWebSocket } from "bun";
 import type { AppConfig } from "./config.ts";
 import type { SessionUser } from "./auth.ts";
+import { RESOURCE_BUSY_MESSAGE, type HostMetricsProvider } from "./host-metrics.ts";
 import type { VmUserManager } from "./vm-users.ts";
 
 /**
@@ -261,7 +262,8 @@ export function handleRdpWsMessage(
   ws: ServerWebSocket<RdpWsContext>,
   message: string | Buffer,
   _config: AppConfig,
-  vmUsers: VmUserManager
+  vmUsers: VmUserManager,
+  hostMetrics: HostMetricsProvider
 ): void {
   if (typeof message === "string") {
     return;
@@ -287,6 +289,17 @@ export function handleRdpWsMessage(
     }
     if (payload.length < 11 || payload.length > MAX_X224_HANDSHAKE_BYTES || payload[0] !== 0x03) {
       sendErrorAndClose(ws, "Malformed X.224 TPKT Connection Request.");
+      return;
+    }
+
+    const metricsSnap = hostMetrics.getSnapshot();
+    if (metricsSnap.overloaded) {
+      rdpLog(
+        ws.data,
+        `Refusing RDP connection: 5m average CPU is ${metricsSnap.cpuAvg5mPercent}% (>= ${metricsSnap.maxCpuAvg5mPercent}%)`
+      );
+      unregisterRdpWs(ws, vmUsers);
+      sendErrorAndClose(ws, RESOURCE_BUSY_MESSAGE);
       return;
     }
 

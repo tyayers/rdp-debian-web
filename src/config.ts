@@ -15,6 +15,9 @@ export interface AppConfig {
   vmUserGroups: string[];
   setupUserScript: string | null;
   onConnectScript: string | null;
+  hasExplicitOnConnectOverride: boolean;
+  isCompiledBinary: boolean;
+  maxConnectCpuAvg5m: number;
   usersFile: string;
   dataDir: string;
   publicDir: string;
@@ -46,12 +49,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const baseDir = isCompiledBinary ? startDir : path.resolve(import.meta.dir, "..");
 
   const rawOnConnect = env.ON_CONNECT_SCRIPT?.trim();
+  const hasExplicitOnConnectOverride = Boolean(rawOnConnect);
   const onConnectScript =
     rawOnConnect && ["false", "none", "off", "0"].includes(rawOnConnect.toLowerCase())
       ? null
       : rawOnConnect
         ? path.resolve(baseDir, rawOnConnect)
         : path.join(baseDir, "scripts", "on-connect.sh");
+
+  const parsedMaxCpu = env.MAX_CONNECT_CPU_AVG_5M
+    ? Number.parseFloat(env.MAX_CONNECT_CPU_AVG_5M)
+    : Number.NaN;
+  const maxConnectCpuAvg5m =
+    Number.isFinite(parsedMaxCpu) && parsedMaxCpu > 0 && parsedMaxCpu <= 100 ? parsedMaxCpu : 70;
 
   const usersFile = env.USERS_FILE?.trim()
     ? path.resolve(startDir, env.USERS_FILE.trim())
@@ -74,6 +84,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       .filter(Boolean),
     setupUserScript: env.SETUP_USER_SCRIPT?.trim() || null,
     onConnectScript,
+    hasExplicitOnConnectOverride,
+    isCompiledBinary,
+    maxConnectCpuAvg5m,
     usersFile,
     dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : path.join(baseDir, "data"),
     publicDir: path.join(baseDir, "public"),

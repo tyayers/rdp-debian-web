@@ -550,6 +550,16 @@ export class RdpViewer {
     this.session.resize(width, height);
   }
 
+  recalibrateViewport() {
+    if (!this.connected || !this.session) return;
+    clearTimeout(this.resizeTimer);
+    const { width, height, rectWidth, rectHeight } = this.computeTargetDimensions();
+    this.sendClientLog(
+      `Manual display recalibration -> ${width}x${height} (viewport=${rectWidth}x${rectHeight}, window=${window.innerWidth}x${window.innerHeight})`
+    );
+    this.session.recalibrate(width, height);
+  }
+
   releaseAllInputs() {
     if (!this.connected || !this.session) return;
     this.session.release_all();

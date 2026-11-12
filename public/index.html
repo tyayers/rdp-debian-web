@@ -94,6 +94,11 @@
       </div>
 
       <div class="topbar-right">
+        <div class="host-metrics-bar" aria-label="Host VM resource usage">
+          <span id="metric-cpu-pill" class="mono-pill metric-pill">CPU —</span>
+          <span id="metric-mem-pill" class="mono-pill metric-pill">MEM —</span>
+        </div>
+
         <a
           id="open-new-tab-link"
           href="/desktop"
@@ -162,6 +167,14 @@
             <span class="meta-k">Home</span>
             <code id="sidebar-vm-home"></code>
           </div>
+          <div class="meta-kv">
+            <span class="meta-k">CPU (5m avg)</span>
+            <code id="sidebar-cpu-avg">—</code>
+          </div>
+          <div class="meta-kv">
+            <span class="meta-k">Memory</span>
+            <code id="sidebar-mem-used">—</code>
+          </div>
         </div>
       </aside>
 
@@ -184,6 +197,14 @@
 
             <button type="button" id="cad-btn" class="btn btn-ghost btn-compact" disabled>
               <span>Ctrl+Alt+Del</span>
+            </button>
+
+            <button type="button" id="recalibrate-btn" class="btn btn-ghost btn-compact" disabled>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="2" y="4" width="20" height="16" rx="2"></rect>
+                <path d="M6 8h3M6 8v3M18 16h-3M18 16v-3"></path>
+              </svg>
+              <span>Fit display</span>
             </button>
 
             <button type="button" id="fullscreen-btn" class="btn btn-ghost btn-compact">

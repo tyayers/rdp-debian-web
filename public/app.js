@@ -34,13 +34,18 @@ const el = {
   themeToggleBtn: document.getElementById("theme-toggle-btn"),
   topbarUserEmail: document.getElementById("topbar-user-email"),
   logoutBtn: document.getElementById("logout-btn"),
+  metricCpuPill: document.getElementById("metric-cpu-pill"),
+  metricMemPill: document.getElementById("metric-mem-pill"),
   sidebarVmUser: document.getElementById("sidebar-vm-user"),
   sidebarVmHome: document.getElementById("sidebar-vm-home"),
+  sidebarCpuAvg: document.getElementById("sidebar-cpu-avg"),
+  sidebarMemUsed: document.getElementById("sidebar-mem-used"),
 
   rdpStatusDot: document.getElementById("rdp-status-dot"),
   rdpStatusText: document.getElementById("rdp-status-text"),
   clipboardBtn: document.getElementById("clipboard-btn"),
   cadBtn: document.getElementById("cad-btn"),
+  recalibrateBtn: document.getElementById("recalibrate-btn"),
   fullscreenBtn: document.getElementById("fullscreen-btn"),
   disconnectBtn: document.getElementById("disconnect-btn"),
 
@@ -135,9 +140,67 @@ async function apiPost(path, payload) {
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    throw new Error(data.error || `Request failed (${resp.status})`);
+    const err = new Error(data.error || `Request failed (${resp.status})`);
+    err.code = data.code;
+    err.metrics = data.metrics;
+    throw err;
   }
   return data;
+}
+
+function formatGiB(bytes) {
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1);
+}
+
+function renderHostMetrics(metrics) {
+  if (!metrics) return;
+  const cpuNow = Math.round(metrics.cpuCurrentPercent);
+  const cpu5m = Number(metrics.cpuAvg5mPercent).toFixed(1);
+  const memPct = Math.round(metrics.memUsedPercent);
+  const usedGiB = formatGiB(metrics.memUsedBytes);
+  const totalGiB = formatGiB(metrics.memTotalBytes);
+
+  if (el.metricCpuPill) {
+    el.metricCpuPill.dataset.overloaded = metrics.overloaded ? "true" : "false";
+    el.metricCpuPill.textContent = metrics.overloaded
+      ? `! CPU ${cpuNow}% · 5m ${cpu5m}%`
+      : `CPU ${cpuNow}% · 5m ${cpu5m}%`;
+  }
+  if (el.metricMemPill) {
+    el.metricMemPill.textContent = `MEM ${memPct}% (${usedGiB}/${totalGiB} GB)`;
+  }
+  if (el.sidebarCpuAvg) {
+    el.sidebarCpuAvg.textContent = `${cpu5m}% (now ${cpuNow}%)`;
+  }
+  if (el.sidebarMemUsed) {
+    el.sidebarMemUsed.textContent = `${usedGiB} / ${totalGiB} GB (${memPct}%)`;
+  }
+}
+
+function startMetricsPolling() {
+  const refreshMetrics = async () => {
+    if (document.visibilityState === "hidden") return;
+    try {
+      const resp = await fetch(withUserQuery("/api/metrics"), {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data.metrics) {
+        renderHostMetrics(data.metrics);
+      }
+    } catch {
+      // Ignore transient network poll errors
+    }
+  };
+
+  setInterval(refreshMetrics, 3000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      void refreshMetrics();
+    }
+  });
 }
 
 function showExclusiveView(target) {
@@ -160,6 +223,8 @@ function ensureRdpViewer() {
         el.disconnectBtn.hidden = false;
         el.clipboardBtn.disabled = false;
         el.cadBtn.disabled = false;
+        el.recalibrateBtn.disabled = false;
+        el.rdpReconnectBtn.textContent = "Reconnect to desktop";
         el.rdpReconnectBtn.hidden = true;
         setBanner(el.rdpErrorBanner, "");
       } else if (status === "connecting") {
@@ -172,14 +237,24 @@ function ensureRdpViewer() {
         el.rdpReconnectBtn.hidden = true;
       } else if (status === "error") {
         state.connecting = false;
-        el.rdpStatusText.textContent = "Disconnected";
-        el.overlayHeading.textContent = "Connection interrupted";
-        el.overlayDesc.textContent = `Signed in as ${state.user?.email || ""} (${state.user?.username || ""}).`;
+        const isResourceBusy =
+          typeof detail === "string" && detail.toLowerCase().includes("no free resources");
+        el.rdpStatusText.textContent = isResourceBusy ? "No free resources" : "Disconnected";
+        el.overlayHeading.textContent = isResourceBusy
+          ? "No free resources available"
+          : "Connection interrupted";
+        el.overlayDesc.textContent = isResourceBusy
+          ? "Host VM average CPU over the last 5 minutes is 70% or higher."
+          : `Signed in as ${state.user?.email || ""} (${state.user?.username || ""}).`;
         el.rdpConnectOverlay.hidden = false;
+        el.rdpReconnectBtn.textContent = isResourceBusy
+          ? "Retry connection"
+          : "Reconnect to desktop";
         el.rdpReconnectBtn.hidden = false;
         el.disconnectBtn.hidden = true;
         el.clipboardBtn.disabled = true;
         el.cadBtn.disabled = true;
+        el.recalibrateBtn.disabled = true;
         setBanner(el.rdpErrorBanner, detail || "Unable to establish xrdp session.");
       } else {
         state.connecting = false;
@@ -188,10 +263,12 @@ function ensureRdpViewer() {
           detail === "Moved to new tab" ? "Active in new tab" : "Desktop signed out";
         el.overlayDesc.textContent = `Reconnect to start a fresh desktop session for '${state.user?.username || ""}'.`;
         el.rdpConnectOverlay.hidden = false;
+        el.rdpReconnectBtn.textContent = "Reconnect to desktop";
         el.rdpReconnectBtn.hidden = false;
         el.disconnectBtn.hidden = true;
         el.clipboardBtn.disabled = true;
         el.cadBtn.disabled = true;
+        el.recalibrateBtn.disabled = true;
       }
     },
     onRemoteClipboard: (text) => {
@@ -214,6 +291,9 @@ async function provisionAndAutoConnect() {
 
   try {
     const ensured = await apiPost("/api/vm-user/ensure", {});
+    if (ensured.metrics) {
+      renderHostMetrics(ensured.metrics);
+    }
     state.user = ensured.user;
     state.rdpPassword = ensured.rdpPassword;
     el.sidebarVmUser.textContent = state.user.username;
@@ -226,10 +306,21 @@ async function provisionAndAutoConnect() {
     });
   } catch (err) {
     state.connecting = false;
+    if (err.metrics) {
+      renderHostMetrics(err.metrics);
+    }
+    const isResourceBusy = err.code === "RESOURCE_BUSY";
     el.rdpStatusDot.dataset.state = "disconnected";
-    el.rdpStatusText.textContent = "Disconnected";
-    el.overlayHeading.textContent = "Provisioning failed";
-    el.overlayDesc.textContent = `Could not prepare Linux user '${state.user.username}'.`;
+    el.rdpStatusText.textContent = isResourceBusy ? "No free resources" : "Disconnected";
+    el.overlayHeading.textContent = isResourceBusy
+      ? "No free resources available"
+      : "Provisioning failed";
+    el.overlayDesc.textContent = isResourceBusy
+      ? `Host VM 5-minute average CPU is ${
+          err.metrics ? `${Number(err.metrics.cpuAvg5mPercent).toFixed(1)}%` : "≥ 70%"
+        } (limit: 70%).`
+      : `Could not prepare Linux user '${state.user.username}'.`;
+    el.rdpReconnectBtn.textContent = isResourceBusy ? "Retry connection" : "Reconnect to desktop";
     el.rdpReconnectBtn.hidden = false;
     setBanner(el.rdpErrorBanner, err.message);
   }
@@ -305,10 +396,12 @@ async function bootstrap() {
     el.overlayHeading.textContent = "Desktop signed out";
     el.overlayDesc.textContent = `Reconnect to start a fresh desktop session for '${state.user?.username || ""}'.`;
     el.rdpConnectOverlay.hidden = false;
+    el.rdpReconnectBtn.textContent = "Reconnect to desktop";
     el.rdpReconnectBtn.hidden = false;
     el.disconnectBtn.hidden = true;
     el.clipboardBtn.disabled = true;
     el.cadBtn.disabled = true;
+    el.recalibrateBtn.disabled = true;
   });
 
   // Immediately close WebSocket on tab close / reload so the VM desktop session signs out right away
@@ -318,6 +411,11 @@ async function bootstrap() {
 
   el.cadBtn.addEventListener("click", () => {
     state.viewer?.sendCtrlAltDel();
+    el.rdpCanvas.focus();
+  });
+
+  el.recalibrateBtn.addEventListener("click", () => {
+    state.viewer?.recalibrateViewport();
     el.rdpCanvas.focus();
   });
 
@@ -354,6 +452,11 @@ async function bootstrap() {
 
   const resp = await fetch(withUserQuery("/api/me"), { credentials: "same-origin" });
   const data = await resp.json().catch(() => ({}));
+
+  if (data.metrics) {
+    renderHostMetrics(data.metrics);
+  }
+  startMetricsPolling();
 
   if (!data.authenticated) {
     if (data.error) {

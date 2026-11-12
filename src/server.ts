@@ -10,6 +10,11 @@ import {
 import { VmUserManager, type SystemUserAdapter } from "./vm-users.ts";
 import { EMBEDDED_PUBLIC_FILES } from "./embedded-assets.ts";
 import {
+  HostMetricsMonitor,
+  RESOURCE_BUSY_MESSAGE,
+  type HostMetricsProvider,
+} from "./host-metrics.ts";
+import {
   createRdpWsContext,
   handleRdpWsClose,
   handleRdpWsMessage,
@@ -132,10 +137,13 @@ function verifyWsOrigin(req: Request, config: AppConfig): boolean {
 
 export function createAppServer(
   customConfig?: Partial<AppConfig>,
-  systemAdapter?: SystemUserAdapter
+  systemAdapter?: SystemUserAdapter,
+  metricsOverride?: HostMetricsProvider
 ) {
   const config: AppConfig = { ...loadConfig(), ...customConfig };
   const vmUsers = new VmUserManager(config, systemAdapter);
+  const hostMetrics: HostMetricsProvider =
+    metricsOverride ?? new HostMetricsMonitor(config.maxConnectCpuAvg5m);
 
   const server = Bun.serve<RdpWsContext>({
     hostname: config.host,
@@ -184,14 +192,20 @@ export function createAppServer(
         return jsonResponse({ ok: true });
       }
 
+      // Live host VM CPU & memory usage telemetry
+      if (pathname === "/api/metrics" && req.method === "GET") {
+        return jsonResponse({ metrics: hostMetrics.getSnapshot() });
+      }
+
       // Identity lookup (read-only: inspects ?user=..., GCP IAP header, or session cookie)
       if (pathname === "/api/me" && req.method === "GET") {
+        const metrics = hostMetrics.getSnapshot();
         const resolved = resolveRequestIdentity(req, config);
         if (!resolved) {
-          return jsonResponse({ authenticated: false });
+          return jsonResponse({ authenticated: false, metrics });
         }
         if ("error" in resolved) {
-          return jsonResponse({ authenticated: false, error: resolved.error }, 400);
+          return jsonResponse({ authenticated: false, error: resolved.error, metrics }, 400);
         }
 
         const extraHeaders = resolved.setCookie ? { "Set-Cookie": resolved.setCookie } : undefined;
@@ -205,6 +219,7 @@ export function createAppServer(
               username: resolved.session.username,
             },
             demos: DEMO_CATALOG,
+            metrics,
           },
           200,
           extraHeaders
@@ -221,14 +236,31 @@ export function createAppServer(
           return jsonResponse({ error: "Invalid CSRF token" }, 403);
         }
 
+        const extraHeaders = resolved.setCookie
+          ? { "Set-Cookie": resolved.setCookie }
+          : undefined;
+
+        const metrics = hostMetrics.getSnapshot();
+        if (metrics.overloaded) {
+          console.warn(
+            `${new Date().toISOString()} [capacity] Refused session for '${resolved.session.username}': 5m avg CPU is ${metrics.cpuAvg5mPercent}% (>= ${metrics.maxCpuAvg5mPercent}%)`
+          );
+          return jsonResponse(
+            {
+              error: RESOURCE_BUSY_MESSAGE,
+              code: "RESOURCE_BUSY",
+              metrics,
+            },
+            503,
+            extraHeaders
+          );
+        }
+
         try {
           const provisioned = await vmUsers.ensureProvisionedUser(
             resolved.session.username,
             resolved.session.email
           );
-          const extraHeaders = resolved.setCookie
-            ? { "Set-Cookie": resolved.setCookie }
-            : undefined;
           return jsonResponse(
             {
               ok: true,
@@ -239,6 +271,7 @@ export function createAppServer(
                 homeDir: provisioned.homeDir,
               },
               rdpPassword: provisioned.password,
+              metrics,
             },
             200,
             extraHeaders
@@ -281,9 +314,10 @@ export function createAppServer(
         if (pathname === "/" || pathname === "/desktop") {
           const nonce = crypto.randomBytes(16).toString("base64");
           const diskIndex = Bun.file(path.join(config.publicDir, "index.html"));
-          const indexFile = (await diskIndex.exists())
-            ? diskIndex
-            : Bun.file(EMBEDDED_PUBLIC_FILES["/index.html"]!.filePath);
+          const indexFile =
+            !config.isCompiledBinary && (await diskIndex.exists())
+              ? diskIndex
+              : Bun.file(EMBEDDED_PUBLIC_FILES["/index.html"]!.filePath);
           const htmlTemplate = await indexFile.text();
           const html = htmlTemplate.replaceAll("{{CSP_NONCE}}", nonce);
           const headers = new Headers({
@@ -298,19 +332,21 @@ export function createAppServer(
           return new Response(req.method === "HEAD" ? null : html, { status: 200, headers });
         }
 
-        // Safe static asset resolution inside publicDir (with embedded binary fallback)
+        // Safe static asset resolution: compiled binary always prefers embedded assets so stale disk files never shadow updates
         const safeRel = path.posix.normalize(pathname).replace(/^\/+/, "");
-        const resolved = path.resolve(config.publicDir, safeRel);
-        if (resolved.startsWith(config.publicDir + path.sep) && !safeRel.includes("..")) {
-          const file = Bun.file(resolved);
-          if (await file.exists()) {
-            const ext = path.extname(resolved).toLowerCase();
-            const headers = new Headers({
-              "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
-              "Cache-Control": ext === ".wasm" ? "public, max-age=3600" : "no-cache",
-            });
-            applySecurityHeaders(headers);
-            return new Response(req.method === "HEAD" ? null : file, { status: 200, headers });
+        if (!config.isCompiledBinary) {
+          const resolved = path.resolve(config.publicDir, safeRel);
+          if (resolved.startsWith(config.publicDir + path.sep) && !safeRel.includes("..")) {
+            const file = Bun.file(resolved);
+            if (await file.exists()) {
+              const ext = path.extname(resolved).toLowerCase();
+              const headers = new Headers({
+                "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
+                "Cache-Control": "no-store",
+              });
+              applySecurityHeaders(headers);
+              return new Response(req.method === "HEAD" ? null : file, { status: 200, headers });
+            }
           }
         }
 
@@ -319,7 +355,7 @@ export function createAppServer(
           const file = Bun.file(embedded.filePath);
           const headers = new Headers({
             "Content-Type": embedded.contentType,
-            "Cache-Control": safeRel.endsWith(".wasm") ? "public, max-age=3600" : "no-cache",
+            "Cache-Control": "no-store",
           });
           applySecurityHeaders(headers);
           return new Response(req.method === "HEAD" ? null : file, { status: 200, headers });
@@ -337,7 +373,7 @@ export function createAppServer(
         registerRdpWsOpen(ws, vmUsers);
       },
       message(ws, message) {
-        handleRdpWsMessage(ws, message, config, vmUsers);
+        handleRdpWsMessage(ws, message, config, vmUsers, hostMetrics);
       },
       close(ws, code, reason) {
         handleRdpWsClose(ws, code, reason, vmUsers);
@@ -345,7 +381,7 @@ export function createAppServer(
     },
   });
 
-  return { server, config, vmUsers };
+  return { server, config, vmUsers, hostMetrics };
 }
 
 if (import.meta.main) {
