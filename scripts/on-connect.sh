@@ -273,7 +273,7 @@ install_or_update_system_tools() {
   # 1a. Base desktop packages: QTerminal, PCManFM-Qt, FeatherPad, LXQt panel/session/menu data, Adwaita icons, GIO/GVFS, zstd, XDG utils & GTK portal
   local missing_base=0
   local cmd
-  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel lxqt-config tint2 picom setxkbmap qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
+  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel lxqt-config tint2 picom setxkbmap gxkb qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
@@ -287,7 +287,7 @@ install_or_update_system_tools() {
     apt_get update -qq
     apt_get install -y -qq --no-install-recommends \
       ca-certificates curl gpg zstd xdg-utils desktop-file-utils \
-      adwaita-icon-theme librsvg2-common tint2 picom x11-xkb-utils xkb-data qterminal pcmanfm-qt featherpad \
+      adwaita-icon-theme librsvg2-common tint2 picom x11-xkb-utils xkb-data gxkb qterminal pcmanfm-qt featherpad \
       lxqt-menu-data lxqt-config lxqt-panel lxqt-session libglib2.0-bin gvfs \
       dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
@@ -1157,6 +1157,20 @@ CLAUDE_DESKTOP_PATH="$(resolve_or_create_desktop "claude" "Claude" "claude-deskt
 CONFIG_DESKTOP_PATH="$(resolve_or_create_desktop "settings" "Settings" "lxqt-config" "preferences-desktop" \
   lxqt-config.desktop org.lxqt.lxqt-config.desktop)"
 
+SETTINGS_LAUNCHER_PATH="$USER_APPS_DIR/apigee-settings.desktop"
+write_user_file "$SETTINGS_LAUNCHER_PATH" 0644 <<'EOF' || true
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Settings
+Comment=Configure LXQt and system settings
+Exec=lxqt-config
+Icon=preferences-desktop
+Terminal=false
+NoDisplay=true
+Categories=Settings;DesktopSettings;Qt;LXQt;
+EOF
+
 LXQT_MENU_FILE="/etc/xdg/menus/lxqt-applications.menu"
 if [[ ! -f "$LXQT_MENU_FILE" && -f /etc/xdg/menus/lxqt-panel-applications.menu ]]; then
   LXQT_MENU_FILE="/etc/xdg/menus/lxqt-panel-applications.menu"
@@ -1177,7 +1191,7 @@ iconSize=22
 width=100
 width-percent=true
 reserve-space=true
-plugins=mainmenu, taskbar, spacer, kbindicator, signout
+plugins=mainmenu, taskbar, spacer, tray, signout
 
 [mainmenu]
 type=mainmenu
@@ -1195,13 +1209,9 @@ size=0
 expandable=true
 spaceType=invisible
 
-[kbindicator]
+[tray]
 alignment=Right
-type=kbindicator
-showLayout=true
-showCapslock=true
-showNumlock=false
-showScrolllock=false
+type=tray
 
 [signout]
 alignment=Right
@@ -1393,7 +1403,7 @@ launcher_item_app = $HOME_LAUNCHER_PATH
 launcher_item_app = $EDITOR_DESKTOP_PATH
 launcher_item_app = $ANTIGRAVITY_DESKTOP_PATH
 launcher_item_app = $CLAUDE_DESKTOP_PATH
-launcher_item_app = $CONFIG_DESKTOP_PATH
+launcher_item_app = $SETTINGS_LAUNCHER_PATH
 EOF
 
 # 3. Copy wallpaper.jpg into user's home directory & configure PCManFM-Qt (both lxqt and default profiles!)
@@ -1636,6 +1646,34 @@ Type=Application
 Name=tint2 Dock
 Comment=Bottom application launcher dock
 Exec=tint2
+Terminal=false
+Hidden=false
+NoDisplay=true
+EOF
+
+GXKB_CONF="$HOMEDIR/.config/gxkb/gxkb.cfg"
+if [[ ! -f "$GXKB_CONF" ]]; then
+  ensure_user_dir "$HOMEDIR/.config/gxkb"
+  write_user_file "$GXKB_CONF" 0644 <<'EOF' || true
+[xkb config]
+group_policy=2
+default_group=0
+never_modify_config=false
+model=pc105
+layouts=us,de,fr,es
+variants=,,,
+toggle_option=grp:alt_shift_toggle
+compose_key_position=
+EOF
+fi
+
+GXKB_AUTOSTART="$HOMEDIR/.config/autostart/gxkb.desktop"
+write_user_file "$GXKB_AUTOSTART" 0644 <<'EOF' || true
+[Desktop Entry]
+Type=Application
+Name=Keyboard Layout Indicator
+Comment=System tray keyboard layout dropdown menu
+Exec=gxkb
 Terminal=false
 Hidden=false
 NoDisplay=true

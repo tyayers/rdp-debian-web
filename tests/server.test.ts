@@ -653,7 +653,8 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
     );
     expect(portalsConf).toContain("default=gtk");
     expect(firstPass).toContain("panels=panel1");
-    expect(firstPass).toContain("plugins=mainmenu, taskbar, spacer, kbindicator, signout");
+    expect(firstPass).toContain("plugins=mainmenu, taskbar, spacer, tray, signout");
+    expect(firstPass).toContain("[tray]\nalignment=Right\ntype=tray");
     expect(firstPass).toContain("menu_file=/etc/xdg/menus/");
     expect(firstPass).toContain("spaceType=invisible");
     expect(firstPass).toContain("[signout]\nalignment=Right\ntype=quicklaunch");
@@ -667,6 +668,9 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
     expect(tint2Conf).toContain("panel_position = bottom center horizontal");
     const sessionConf = await fs.readFile(path.join(freshHome, ".config", "lxqt", "session.conf"), "utf8");
     expect(sessionConf).toContain('layout="us,de,fr,es"');
+    const gxkbConf = await fs.readFile(path.join(freshHome, ".config", "gxkb", "gxkb.cfg"), "utf8");
+    expect(gxkbConf).toContain("layouts=us,de,fr,es");
+    expect(await Bun.file(path.join(autostartDir, "gxkb.desktop")).exists()).toBe(true);
     expect(tint2Conf).toContain("background_color = #000000 0");
     expect(tint2Conf).toContain("launcher_icon_size = 48");
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "google-chrome.desktop")}`);
@@ -674,7 +678,13 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "featherpad.desktop")}`);
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "antigravity.desktop")}`);
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "com.anthropic.Claude.desktop")}`);
-    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "lxqt-config.desktop")}`);
+    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(freshHome, ".local", "share", "applications", "apigee-settings.desktop")}`);
+    const settingsLauncher = await fs.readFile(
+      path.join(freshHome, ".local", "share", "applications", "apigee-settings.desktop"),
+      "utf8"
+    );
+    expect(settingsLauncher).toContain("Name=Settings");
+    expect(settingsLauncher).toContain("Icon=preferences-desktop");
     expect(await Bun.file(path.join(autostartDir, "tint2.desktop")).exists()).toBe(true);
     expect(wallpaperStat.size).toBe(sourceWallpaperStat.size);
     expect(pcmanfmConf).toContain("QuickExec=true");
