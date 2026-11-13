@@ -1226,7 +1226,7 @@ border_color_pressed = #000000 0
 
 # Panel geometry: auto-width centered at bottom
 panel_items = L
-panel_size = 0 76
+panel_size = 0 66
 panel_margin = 0 8
 panel_padding = 8 4 8
 panel_background_id = 1
@@ -1246,7 +1246,7 @@ mouse_effects = 1
 launcher_padding = 6 4 6
 launcher_background_id = 0
 launcher_icon_background_id = 0
-launcher_icon_size = 64
+launcher_icon_size = 54
 launcher_icon_asb = 100 0 0
 launcher_icon_theme = Adwaita
 launcher_icon_theme_override = 0
