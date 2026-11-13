@@ -60,6 +60,23 @@ sudo "$(which bun)" run start
 Then access via your GCP IAP domain, or directly with `?user=test@example.com`:
 `https://your-domain.com/?user=test@example.com`
 
+### 4. Run as a `systemd` Service (Debian 13)
+
+```bash
+# Register and enable (auto-detects ./apigee-ai-demos or bun)
+sudo ./scripts/systemd-service.sh register
+
+# Start, stop, restart, status, logs
+sudo systemctl start apigee-ai-demos
+sudo systemctl stop apigee-ai-demos
+sudo systemctl restart apigee-ai-demos
+sudo systemctl status apigee-ai-demos
+sudo journalctl -u apigee-ai-demos -f
+
+# Deregister and remove
+sudo ./scripts/systemd-service.sh deregister
+```
+
 ## VM Tool Bootstrap & Session Lifecycle (`scripts/on-connect.sh`)
 
 - **Installed once system-wide for everyone (`--system-only`)**: On startup as root, the server ensures **Plank**, **QTerminal**, **PCManFM-Qt**, **FeatherPad**, **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), **Claude Code** (`/usr/local/bin/claude`, with `/etc/claude-code/managed-settings.json` disabling per-user background self-updates), **Claude Desktop with Cowork** (`claude-desktop` from Anthropic's official APT repository along with its QEMU/KVM/virtiofsd/bubblewrap sandbox dependencies and `kvm` group membership for VM users), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed and kept updated at the OS level, and configures `/etc/xrdp/sesman.ini` (`KillDisconnected=true`, `DisconnectedTimeLimit=60`).

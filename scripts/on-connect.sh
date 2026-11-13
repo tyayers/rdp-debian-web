@@ -279,7 +279,7 @@ install_or_update_system_tools() {
       break
     fi
   done
-  if [[ ! -f /etc/xdg/menus/lxqt-applications.menu || ! -f /usr/share/xdg-desktop-portal/portals/gtk.portal || ! -f /usr/share/icons/Adwaita/index.theme ]]; then
+  if [[ ! -f /etc/xdg/menus/lxqt-applications.menu || ! -f /usr/share/xdg-desktop-portal/portals/gtk.portal || ! -f /usr/share/icons/Adwaita/index.theme ]] || ! dpkg -s librsvg2-common >/dev/null 2>&1; then
     missing_base=1
   fi
   if [[ "$missing_base" -eq 1 ]]; then
@@ -287,7 +287,7 @@ install_or_update_system_tools() {
     apt_get update -qq
     apt_get install -y -qq --no-install-recommends \
       ca-certificates curl gpg zstd xdg-utils desktop-file-utils \
-      adwaita-icon-theme plank qterminal pcmanfm-qt featherpad \
+      adwaita-icon-theme librsvg2-common plank qterminal pcmanfm-qt featherpad \
       lxqt-menu-data lxqt-session libglib2.0-bin gvfs dconf-cli \
       dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
@@ -622,7 +622,7 @@ Categories=System;
 EOF
   chmod 0644 /usr/share/applications/apigee-signout.desktop
 
-  # 1j. System-wide locked dconf database for Plank so every user gets identical dock settings & icons
+  # 1j. System-wide dconf defaults for Plank (unlocked so Plank's GSettings sync never gets rejected)
   if command -v dconf >/dev/null 2>&1; then
     install -d -m 0755 /etc/dconf/profile /etc/dconf/db/local.d /etc/dconf/db/local.d/locks
     cat >/etc/dconf/profile/user <<'EOF'
@@ -643,16 +643,7 @@ items-alignment='center'
 EOF
     chmod 0644 /etc/dconf/db/local.d/00-apigee-plank
 
-    cat >/etc/dconf/db/local.d/locks/00-apigee-plank <<'EOF'
-/net/launchpad/plank/docks/dock1/dock-items
-/net/launchpad/plank/docks/dock1/show-dock-item
-/net/launchpad/plank/docks/dock1/pinned-only
-/net/launchpad/plank/docks/dock1/hide-mode
-/net/launchpad/plank/docks/dock1/position
-/net/launchpad/plank/docks/dock1/alignment
-/net/launchpad/plank/docks/dock1/items-alignment
-EOF
-    chmod 0644 /etc/dconf/db/local.d/locks/00-apigee-plank
+    rm -f /etc/dconf/db/local.d/locks/00-apigee-plank
     dconf update 2>/dev/null || true
   fi
 
@@ -662,6 +653,8 @@ EOF
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-LXQt}"
 export XDG_MENU_PREFIX="${XDG_MENU_PREFIX:-lxqt-}"
 export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-dconf}"
 
 IMMEDIATE=0
 if [[ "${1:-}" == "--immediate" ]]; then
@@ -674,29 +667,31 @@ if command -v flock >/dev/null 2>&1; then
   flock -n 8 || exit 0
 fi
 
+PLANK_LOG="${XDG_RUNTIME_DIR:-/tmp}/apigee-plank-$(id -u).log"
+
 # 1. Propagate active X11 DISPLAY & XAUTHORITY into D-Bus and systemd --user BEFORE GTK/libbamf calls
 if [[ -n "${DISPLAY:-}" ]]; then
   if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-    dbus-update-activation-environment --systemd DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null \
-      || dbus-update-activation-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
+    dbus-update-activation-environment --systemd DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_DATA_DIRS 2>/dev/null \
+      || dbus-update-activation-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_DATA_DIRS 2>/dev/null || true
   fi
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user import-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
+    systemctl --user import-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_DATA_DIRS 2>/dev/null || true
     systemctl --user reset-failed bamfdaemon.service xdg-desktop-portal.service xdg-desktop-portal-gtk.service 2>/dev/null || true
   fi
 fi
 
-# 2. On cold session startup, wait briefly for the WM & LXQt panel so Plank doesn't race X11/GTK/dconf init
+# 2. On cold session startup, wait for the WM & LXQt panel so Plank doesn't race X11/GTK/dconf init
 if [[ "$IMMEDIATE" -eq 0 ]] && command -v pgrep >/dev/null 2>&1; then
   uid_num="$(id -u)"
-  for _ in $(seq 1 40); do
+  for _ in $(seq 1 50); do
     if (pgrep -u "$uid_num" -x openbox >/dev/null 2>&1 || pgrep -u "$uid_num" -x xfwm4 >/dev/null 2>&1) \
       && pgrep -u "$uid_num" -x lxqt-panel >/dev/null 2>&1; then
       break
     fi
     sleep 0.1
   done
-  sleep 0.75
+  sleep 1.5
 fi
 
 # 3. Pre-start bamfdaemon directly on the live X11 DISPLAY and wait until it claims D-Bus so
@@ -710,7 +705,7 @@ if ! pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1; then
     fi
   done
   if command -v gdbus >/dev/null 2>&1; then
-    for _ in $(seq 1 20); do
+    for _ in $(seq 1 25); do
       if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
         --method org.freedesktop.DBus.NameHasOwner org.ayatana.bamf 2>/dev/null | grep -q 'true'; then
         break
@@ -724,7 +719,7 @@ fi
 
 # 4. Launch Plank without xdg-desktop-portal or AT-SPI D-Bus probes (eliminates 120s portal timeout)
 if command -v plank >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
-  exec env NO_AT_BRIDGE=1 GTK_USE_PORTAL=0 GDK_DEBUG=no-portals GIO_USE_PORTALS=0 plank
+  exec env NO_AT_BRIDGE=1 GTK_USE_PORTAL=0 GDK_DEBUG=no-portals GIO_USE_PORTALS=0 plank >"$PLANK_LOG" 2>&1
 fi
 EOF
   chmod 0755 /usr/local/bin/apigee-start-plank
@@ -1047,14 +1042,22 @@ reposition_user_plank() {
   sleep 0.15
 
   if command -v pkill >/dev/null 2>&1; then
+    pkill -TERM -u "$target_uid" -f '/usr/local/bin/apigee-start-plank' 2>/dev/null || true
     pkill -TERM -u "$target_uid" -x plank 2>/dev/null || true
     local attempt
     for ((attempt = 1; attempt <= 15; attempt++)); do
-      pgrep -u "$target_uid" -x plank >/dev/null 2>&1 || break
+      if ! pgrep -u "$target_uid" -x plank >/dev/null 2>&1 \
+        && ! pgrep -u "$target_uid" -f '/usr/local/bin/apigee-start-plank' >/dev/null 2>&1; then
+        break
+      fi
       sleep 0.05
     done
     if pgrep -u "$target_uid" -x plank >/dev/null 2>&1; then
       pkill -KILL -u "$target_uid" -x plank 2>/dev/null || true
+      sleep 0.05
+    fi
+    if pgrep -u "$target_uid" -f '/usr/local/bin/apigee-start-plank' >/dev/null 2>&1; then
+      pkill -KILL -u "$target_uid" -f '/usr/local/bin/apigee-start-plank' 2>/dev/null || true
       sleep 0.05
     fi
   fi
