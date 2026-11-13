@@ -1154,7 +1154,7 @@ ANTIGRAVITY_DESKTOP_PATH="$(resolve_or_create_desktop "antigravity" "Antigravity
   antigravity.desktop)"
 CLAUDE_DESKTOP_PATH="$(resolve_or_create_desktop "claude" "Claude" "claude-desktop %U" "claude-desktop" \
   com.anthropic.Claude.desktop claude-desktop.desktop)"
-CONFIG_DESKTOP_PATH="$(resolve_or_create_desktop "settings" "Configuration Center" "lxqt-config" "preferences-system" \
+CONFIG_DESKTOP_PATH="$(resolve_or_create_desktop "settings" "Settings" "lxqt-config" "preferences-desktop" \
   lxqt-config.desktop org.lxqt.lxqt-config.desktop)"
 
 LXQT_MENU_FILE="/etc/xdg/menus/lxqt-applications.menu"
@@ -1670,6 +1670,7 @@ write_desktop_shortcut() {
   local src_desktop="$1"
   local dest_desktop="$2"
   local override_name="${3:-}"
+  local override_icon="${4:-}"
   [[ ! -f "$src_desktop" ]] && return 0
 
   local entry_name entry_icon entry_comment
@@ -1681,11 +1682,14 @@ write_desktop_shortcut() {
       in_de && /^Name=/ { sub(/^Name=/, ""); print; exit }
     ' "$src_desktop")"
   fi
-  entry_icon="$(awk '
-    /^\[Desktop Entry\][ \t]*$/ { in_de=1; next }
-    /^\[[^]]+\][ \t]*$/ { in_de=0 }
-    in_de && /^Icon=/ { sub(/^Icon=/, ""); print; exit }
-  ' "$src_desktop")"
+  entry_icon="$override_icon"
+  if [[ -z "$entry_icon" ]]; then
+    entry_icon="$(awk '
+      /^\[Desktop Entry\][ \t]*$/ { in_de=1; next }
+      /^\[[^]]+\][ \t]*$/ { in_de=0 }
+      in_de && /^Icon=/ { sub(/^Icon=/, ""); print; exit }
+    ' "$src_desktop")"
+  fi
   entry_comment="$(awk '
     /^\[Desktop Entry\][ \t]*$/ { in_de=1; next }
     /^\[[^]]+\][ \t]*$/ { in_de=0 }
@@ -1711,7 +1715,7 @@ write_desktop_shortcut "$CHROME_DESKTOP_PATH" "$DESKTOP_DIR/google-chrome.deskto
 write_desktop_shortcut "$CODIUM_DESKTOP_PATH" "$DESKTOP_DIR/codium.desktop" "VSCodium"
 write_desktop_shortcut "$ANTIGRAVITY_DESKTOP_PATH" "$DESKTOP_DIR/antigravity.desktop" "Antigravity"
 write_desktop_shortcut "$CLAUDE_DESKTOP_PATH" "$DESKTOP_DIR/claude.desktop" "Claude"
-write_desktop_shortcut "$CONFIG_DESKTOP_PATH" "$DESKTOP_DIR/lxqt-config.desktop" "Configuration Center"
+write_desktop_shortcut "$CONFIG_DESKTOP_PATH" "$DESKTOP_DIR/lxqt-config.desktop" "Settings" "preferences-desktop"
 
 # Remove any other stale .desktop shortcut names left in ~/Desktop from previous runs
 for existing_desk in "$DESKTOP_DIR"/*.desktop; do

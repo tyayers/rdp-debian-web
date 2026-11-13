@@ -726,11 +726,12 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
       {
         shortcutFile: "lxqt-config.desktop",
         sourceAppFile: "lxqt-config.desktop",
-        expectedTitle: "Configuration Center",
+        expectedTitle: "Settings",
+        expectedIcon: "preferences-desktop",
       },
     ];
 
-    for (const { shortcutFile, sourceAppFile, expectedTitle } of expectedDesktopShortcuts) {
+    for (const { shortcutFile, sourceAppFile, expectedTitle, expectedIcon } of expectedDesktopShortcuts) {
       const shortcutText = await fs.readFile(
         path.join(freshHome, "Desktop", shortcutFile),
         "utf8"
@@ -739,7 +740,7 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
       expect(shortcutText).toContain(`Name=${expectedTitle}`);
       expect(shortcutText).not.toContain("URL Handler");
       expect(shortcutText).not.toContain("Action Title");
-      expect(shortcutText).toContain(`Icon=icon-${sourceAppFile}`);
+      expect(shortcutText).toContain(`Icon=${expectedIcon ?? `icon-${sourceAppFile}`}`);
       expect(shortcutText).toContain(`URL=${path.join(mockAppsDir, sourceAppFile)}`);
     }
     expect(
