@@ -142,12 +142,27 @@ function verifyCsrf(req: Request, session: SessionUser): boolean {
 function verifyWsOrigin(req: Request, config: AppConfig): boolean {
   const origin = req.headers.get("origin");
   if (!origin) return true;
-  const expected = getExternalOrigin(req, config);
+  let originUrl: URL;
   try {
-    return new URL(origin).host === new URL(expected).host;
+    originUrl = new URL(origin);
   } catch {
     return false;
   }
+
+  const candidates = [getExternalOrigin(req, config), ...config.allowedOrigins];
+  for (const candidate of candidates) {
+    try {
+      const candidateUrl = candidate.includes("://")
+        ? new URL(candidate)
+        : new URL(`${originUrl.protocol}//${candidate}`);
+      if (originUrl.host === candidateUrl.host) {
+        return true;
+      }
+    } catch {
+      // Ignore malformed candidate
+    }
+  }
+  return false;
 }
 
 export function createAppServer(
@@ -384,7 +399,7 @@ export function createAppServer(
       };
 
       const res = await handleHttpRequest();
-      if (res && !isRdpWs) {
+      if (res) {
         const durationMs = (performance.now() - startedAt).toFixed(1);
         const remoteIp =
           req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||

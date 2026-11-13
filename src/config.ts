@@ -5,6 +5,7 @@ export interface AppConfig {
   port: number;
   host: string;
   publicBaseUrl: string | null;
+  allowedOrigins: string[];
   trustProxy: boolean;
   sessionSecret: string;
   iapEmailHeader: string;
@@ -71,6 +72,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: parsePort(env.PORT, 8080),
     host: env.HOST?.trim() || "0.0.0.0",
     publicBaseUrl: env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, "") || null,
+    allowedOrigins: (env.ALLOWED_ORIGINS ?? "")
+      .split(",")
+      .map((s) => s.trim().replace(/\/+$/, ""))
+      .filter(Boolean),
     trustProxy: parseBool(env.TRUST_PROXY, true),
     sessionSecret,
     iapEmailHeader: (env.IAP_EMAIL_HEADER?.trim() || "x-goog-authenticated-user-email").toLowerCase(),

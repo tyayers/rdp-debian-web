@@ -633,7 +633,7 @@ EOF
 
     cat >/etc/dconf/db/local.d/00-apigee-plank <<'EOF'
 [net/launchpad/plank/docks/dock1]
-dock-items=['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem', '07-claude.dockitem']
+dock-items=['01-chrome.dockitem', '02-home.dockitem', '03-text-editor.dockitem', '04-antigravity.dockitem', '05-claude.dockitem']
 show-dock-item=false
 pinned-only=false
 hide-mode='none'
@@ -681,17 +681,19 @@ if [[ -n "${DISPLAY:-}" ]]; then
   fi
 fi
 
-# 2. On cold session startup, wait for the WM & LXQt panel so Plank doesn't race X11/GTK/dconf init
+# 2. On cold session startup, wait for WM, LXQt panel & PCManFM-Qt desktop, then settle 3s so Plank
+#    initializes after X11/GTK/dconf are completely ready (same state as a post-resize restart).
 if [[ "$IMMEDIATE" -eq 0 ]] && command -v pgrep >/dev/null 2>&1; then
   uid_num="$(id -u)"
   for _ in $(seq 1 50); do
     if (pgrep -u "$uid_num" -x openbox >/dev/null 2>&1 || pgrep -u "$uid_num" -x xfwm4 >/dev/null 2>&1) \
-      && pgrep -u "$uid_num" -x lxqt-panel >/dev/null 2>&1; then
+      && pgrep -u "$uid_num" -x lxqt-panel >/dev/null 2>&1 \
+      && pgrep -u "$uid_num" -x pcmanfm-qt >/dev/null 2>&1; then
       break
     fi
     sleep 0.1
   done
-  sleep 1.5
+  sleep 3
 fi
 
 # 3. Pre-start bamfdaemon directly on the live X11 DISPLAY and wait until it claims D-Bus so
@@ -1305,7 +1307,7 @@ update_pcmanfm_profile() {
       BEGIN {
         sec = ""
         saw_behavior = 0; set_quickexec = 0
-        saw_desktop = 0; set_wp = 0; set_wpmode = 0
+        saw_desktop = 0; set_wp = 0; set_wpmode = 0; set_comp = 0; set_net = 0
       }
       function flush_sec() {
         if (sec == "Behavior" && !set_quickexec) {
@@ -1314,6 +1316,8 @@ update_pcmanfm_profile() {
         } else if (sec == "Desktop") {
           if (!set_wp) { print "Wallpaper=" ENVIRON["TARGET_WALLPAPER"]; set_wp = 1 }
           if (!set_wpmode) { print "WallpaperMode=zoom"; set_wpmode = 1 }
+          if (!set_comp) { print "ShowComputer=false"; set_comp = 1 }
+          if (!set_net) { print "ShowNetwork=false"; set_net = 1 }
         }
       }
       /^\[[^]]+\][ \t]*$/ {
@@ -1343,6 +1347,16 @@ update_pcmanfm_profile() {
             set_wpmode = 1
             next
           }
+          if ($0 ~ /^ShowComputer=/) {
+            print "ShowComputer=false"
+            set_comp = 1
+            next
+          }
+          if ($0 ~ /^ShowNetwork=/) {
+            print "ShowNetwork=false"
+            set_net = 1
+            next
+          }
         }
         print $0
       }
@@ -1358,6 +1372,8 @@ update_pcmanfm_profile() {
           print "[Desktop]"
           print "Wallpaper=" ENVIRON["TARGET_WALLPAPER"]
           print "WallpaperMode=zoom"
+          print "ShowComputer=false"
+          print "ShowNetwork=false"
         }
       }
     ' "$seed" >"$tmp_out"
@@ -1369,6 +1385,8 @@ QuickExec=true
 [Desktop]
 Wallpaper=$USER_WALLPAPER
 WallpaperMode=zoom
+ShowComputer=false
+ShowNetwork=false
 EOF
   fi
   [[ -n "$tmp_seed" ]] && rm -f -- "$tmp_seed"
@@ -1514,7 +1532,7 @@ write_desktop_shortcut() {
   } | write_user_file "$dest_desktop" 0644 || true
 }
 
-write_desktop_shortcut "$TERM_DESKTOP_PATH" "$DESKTOP_DIR/qterminal.desktop"
+write_desktop_shortcut "$TERM_DESKTOP_PATH" "$DESKTOP_DIR/qterminal.desktop" "Terminal"
 write_desktop_shortcut "$CHROME_DESKTOP_PATH" "$DESKTOP_DIR/google-chrome.desktop"
 write_desktop_shortcut "$CODIUM_DESKTOP_PATH" "$DESKTOP_DIR/codium.desktop" "VSCodium"
 write_desktop_shortcut "$ANTIGRAVITY_DESKTOP_PATH" "$DESKTOP_DIR/antigravity.desktop" "Antigravity"
@@ -1529,7 +1547,7 @@ for existing_desk in "$DESKTOP_DIR"/*.desktop; do
   esac
 done
 
-# Exact Plank dock items: Home, Chrome, VSCodium, Terminal, Text Editor, Antigravity, Claude
+# Exact Plank dock items: Chrome, Home, Text Editor, Antigravity, Claude
 declare -A EXPECTED_DOCKITEMS=()
 PLANK_CHANGED=0
 
@@ -1552,13 +1570,11 @@ EOF
   fi
 }
 
-add_plank_item 1 "home" "$HOME_LAUNCHER_PATH"
-add_plank_item 2 "chrome" "$CHROME_DESKTOP_PATH"
-add_plank_item 3 "codium" "$CODIUM_DESKTOP_PATH"
-add_plank_item 4 "terminal" "$TERM_DESKTOP_PATH"
-add_plank_item 5 "text-editor" "$EDITOR_DESKTOP_PATH"
-add_plank_item 6 "antigravity" "$ANTIGRAVITY_DESKTOP_PATH"
-add_plank_item 7 "claude" "$CLAUDE_DESKTOP_PATH"
+add_plank_item 1 "chrome" "$CHROME_DESKTOP_PATH"
+add_plank_item 2 "home" "$HOME_LAUNCHER_PATH"
+add_plank_item 3 "text-editor" "$EDITOR_DESKTOP_PATH"
+add_plank_item 4 "antigravity" "$ANTIGRAVITY_DESKTOP_PATH"
+add_plank_item 5 "claude" "$CLAUDE_DESKTOP_PATH"
 
 # Remove ALL other .dockitem files (including Plank's unnumbered first-run defaults like pcmanfm-qt/clock)
 for existing_item in "$PLANK_LAUNCHERS_DIR"/*.dockitem; do
@@ -1571,14 +1587,14 @@ for existing_item in "$PLANK_LAUNCHERS_DIR"/*.dockitem; do
 done
 
 # Pre-compile per-user ~/.config/dconf/user offline before xrdp starts so even on first login
-# Plank immediately sees all 7 dock-items without running make_default_items()
+# Plank immediately sees all 5 dock-items without running make_default_items()
 if command -v dconf >/dev/null 2>&1; then
   ensure_user_dir "$HOMEDIR/.config/dconf"
   DCONF_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/apigee-dconf.XXXXXX")"
   mkdir -p -- "$DCONF_STAGE/src.d"
   cat >"$DCONF_STAGE/src.d/00-plank" <<'EOF'
 [net/launchpad/plank/docks/dock1]
-dock-items=['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem', '07-claude.dockitem']
+dock-items=['01-chrome.dockitem', '02-home.dockitem', '03-text-editor.dockitem', '04-antigravity.dockitem', '05-claude.dockitem']
 show-dock-item=false
 pinned-only=false
 hide-mode='none'

@@ -659,6 +659,8 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     expect(wallpaperStat.size).toBe(sourceWallpaperStat.size);
     expect(pcmanfmConf).toContain("QuickExec=true");
     expect(pcmanfmConf).toContain("WallpaperMode=zoom");
+    expect(pcmanfmConf).toContain("ShowComputer=false");
+    expect(pcmanfmConf).toContain("ShowNetwork=false");
 
     const expectedDesktopShortcuts: Array<{
       shortcutFile: string;
@@ -668,7 +670,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       {
         shortcutFile: "qterminal.desktop",
         sourceAppFile: "qterminal.desktop",
-        expectedTitle: "Title qterminal.desktop",
+        expectedTitle: "Terminal",
       },
       {
         shortcutFile: "google-chrome.desktop",
@@ -709,13 +711,11 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     ).toBe(false);
 
     const expectedDockItems = [
-      ["01-home.dockitem", "apigee-user-home.desktop"],
-      ["02-chrome.dockitem", "google-chrome.desktop"],
-      ["03-codium.dockitem", "codium.desktop"],
-      ["04-terminal.dockitem", "qterminal.desktop"],
-      ["05-text-editor.dockitem", "featherpad.desktop"],
-      ["06-antigravity.dockitem", "antigravity.desktop"],
-      ["07-claude.dockitem", "com.anthropic.Claude.desktop"],
+      ["01-chrome.dockitem", "google-chrome.desktop"],
+      ["02-home.dockitem", "apigee-user-home.desktop"],
+      ["03-text-editor.dockitem", "featherpad.desktop"],
+      ["04-antigravity.dockitem", "antigravity.desktop"],
+      ["05-claude.dockitem", "com.anthropic.Claude.desktop"],
     ] as const;
 
     for (const [dockFile, desktopFile] of expectedDockItems) {
@@ -723,6 +723,8 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       expect(content).toContain(`Launcher=file://${path.join(mockAppsDir, desktopFile)}`);
     }
     expect(await Bun.file(path.join(plankDir, "clock.dockitem")).exists()).toBe(false);
+    expect(await Bun.file(path.join(plankDir, "03-codium.dockitem")).exists()).toBe(false);
+    expect(await Bun.file(path.join(plankDir, "04-terminal.dockitem")).exists()).toBe(false);
 
     // Verify --signout and --reposition-plank invocations succeed cleanly
     for (const flag of ["--signout", "--reposition-plank"] as const) {
@@ -761,15 +763,13 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     for (const [dockFile] of expectedDockItems) {
       expect(await Bun.file(path.join(bobPlankDir, dockFile)).exists()).toBe(true);
     }
-    const bobCodiumDock = await fs.readFile(path.join(bobPlankDir, "03-codium.dockitem"), "utf8");
-    expect(bobCodiumDock).toContain("zzz-custom-codium.desktop");
-    expect(bobCodiumDock).not.toContain("codium-url-handler.desktop");
     const bobCodiumDesktop = await fs.readFile(
       path.join(fallbackHome, "Desktop", "codium.desktop"),
       "utf8"
     );
     expect(bobCodiumDesktop).toContain("Name=VSCodium\n");
     expect(bobCodiumDesktop).toContain(`URL=${path.join(emptyAppsDir, "zzz-custom-codium.desktop")}`);
+    expect(bobCodiumDesktop).not.toContain("codium-url-handler.desktop");
     const bobClaudeDesktop = await fs.readFile(
       path.join(fallbackHome, "Desktop", "claude.desktop"),
       "utf8"
