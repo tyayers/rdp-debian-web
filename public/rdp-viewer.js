@@ -141,6 +141,7 @@ export class RdpViewer {
     this.cursorCanvas = document.createElement("canvas");
     this.cursorCtx = this.cursorCanvas.getContext("2d");
     this.resizeTimer = null;
+    this.keepaliveTimer = null;
 
     this.boundKeyDown = (e) => this.handleKey(e, true);
     this.boundKeyUp = (e) => this.handleKey(e, false);
@@ -366,6 +367,16 @@ export class RdpViewer {
 
     ws.addEventListener("open", () => {
       if (!this.session) return;
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = setInterval(() => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          try {
+            this.ws.send(new Uint8Array([0xfb]));
+          } catch {
+            // Ignore
+          }
+        }
+      }, 25000);
       for (const pkt of this.pendingLogs.splice(0)) {
         ws.send(pkt);
       }
@@ -385,6 +396,10 @@ export class RdpViewer {
 
       const kind = bytes[0];
       const payload = bytes.subarray(1);
+
+      if (kind === 0xfb) {
+        return;
+      }
 
       if (kind === 0xfd) {
         const statusMsg = textDecoder.decode(payload);
@@ -583,6 +598,8 @@ export class RdpViewer {
   }
 
   cleanupSessionOnly() {
+    clearInterval(this.keepaliveTimer);
+    this.keepaliveTimer = null;
     const sess = this.session;
     this.session = null;
     this.connected = false;

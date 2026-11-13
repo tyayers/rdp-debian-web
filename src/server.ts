@@ -416,7 +416,7 @@ export function createAppServer(
 
     websocket: {
       maxPayloadLength: 16 * 1024 * 1024,
-      idleTimeout: 120,
+      idleTimeout: 900,
       sendPings: true,
       open(ws) {
         registerRdpWsOpen(ws, vmUsers);
