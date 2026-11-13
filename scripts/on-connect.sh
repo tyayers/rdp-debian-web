@@ -273,7 +273,7 @@ install_or_update_system_tools() {
   # 1a. Base desktop packages: QTerminal, PCManFM-Qt, FeatherPad, LXQt panel/session/menu data, Adwaita icons, GIO/GVFS, zstd, XDG utils & GTK portal
   local missing_base=0
   local cmd
-  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel picom qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
+  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel tint2 picom qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
@@ -283,11 +283,11 @@ install_or_update_system_tools() {
     missing_base=1
   fi
   if [[ "$missing_base" -eq 1 ]]; then
-    echo "[status] Installing LXQt desktop, Terminal, Text Editor & desktop utilities..."
+    echo "[status] Installing LXQt desktop, tint2 dock, Terminal, Text Editor & desktop utilities..."
     apt_get update -qq
     apt_get install -y -qq --no-install-recommends \
       ca-certificates curl gpg zstd xdg-utils desktop-file-utils \
-      adwaita-icon-theme librsvg2-common picom qterminal pcmanfm-qt featherpad \
+      adwaita-icon-theme librsvg2-common tint2 picom qterminal pcmanfm-qt featherpad \
       lxqt-menu-data lxqt-panel lxqt-session libglib2.0-bin gvfs \
       dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
@@ -662,13 +662,15 @@ ensure_panel_running() {
   fi
   if command -v lxqt-panel >/dev/null 2>&1; then
     if [[ "$picom_started" -eq 1 ]] && pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
-      # Restart lxqt-panel once picom is active so it detects the X11 compositor for true transparency
       pkill -TERM -u "$(id -u)" -x lxqt-panel 2>/dev/null || true
       sleep 0.3
     fi
     if ! pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
       nohup lxqt-panel </dev/null >/dev/null 2>&1 &
     fi
+  fi
+  if command -v tint2 >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x tint2 >/dev/null 2>&1; then
+    nohup tint2 </dev/null >/dev/null 2>&1 &
   fi
 }
 
@@ -816,7 +818,7 @@ list_user_xrdp_pids() {
     comm=""
     read -r comm <"/proc/$pid/comm" 2>/dev/null || true
     case "$comm" in
-      lxqt-session|lxqt-panel|pcmanfm-qt|picom|plank|bamfdaemon|xdg-desktop-por|openbox|xfwm4|xrdp-chansrv|Xorg|Xvnc)
+      lxqt-session|lxqt-panel|pcmanfm-qt|tint2|picom|plank|bamfdaemon|xdg-desktop-por|openbox|xfwm4|xrdp-chansrv|Xorg|Xvnc)
         printf '%s\n' "$pid"
         continue
         ;;
@@ -914,9 +916,80 @@ terminate_user_xrdp_session() {
 }
 
 reposition_user_plank() {
-  # Legacy hook retained as a no-op: the bottom dock is now managed by lxqt-panel (panel2),
-  # which automatically re-centers on X11 RandR display resize without restarting.
-  return 0
+  local target_user="$1"
+  if [[ "${ON_CONNECT_SKIP_PROCESS_CHECK:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  local target_uid target_gid target_home
+  target_uid="$(id -u -- "$target_user" 2>/dev/null || true)"
+  target_gid="$(id -g -- "$target_user" 2>/dev/null || true)"
+  if [[ -z "$target_uid" || "$target_uid" -lt 1000 || -z "$target_gid" ]]; then
+    return 0
+  fi
+  if [[ "$(id -u)" -ne 0 && "$(id -un)" != "$target_user" ]]; then
+    return 0
+  fi
+  target_home="$(getent passwd -- "$target_user" | cut -d: -f6 || true)"
+  target_home="${target_home:-/home/$target_user}"
+
+  command -v pgrep >/dev/null 2>&1 || return 0
+  command -v tint2 >/dev/null 2>&1 || return 0
+  local sess_pid="" proc_name
+  for proc_name in lxqt-session lxqt-panel openbox pcmanfm-qt; do
+    sess_pid="$(pgrep -u "$target_uid" -x "$proc_name" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$sess_pid" && -r "/proc/$sess_pid/environ" ]]; then
+      break
+    fi
+    sess_pid=""
+  done
+  [[ -z "$sess_pid" ]] && return 0
+
+  local saved_display="" saved_xauth="" saved_xdg_runtime="" saved_dbus="" k v
+  while IFS='=' read -r -d '' k v; do
+    case "$k" in
+      DISPLAY) saved_display="$v" ;;
+      XAUTHORITY) saved_xauth="$v" ;;
+      XDG_RUNTIME_DIR) saved_xdg_runtime="$v" ;;
+      DBUS_SESSION_BUS_ADDRESS) saved_dbus="$v" ;;
+    esac
+  done <"/proc/$sess_pid/environ" || true
+  [[ -z "$saved_display" ]] && return 0
+
+  sleep 0.15
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -TERM -u "$target_uid" -x tint2 2>/dev/null || true
+    local attempt
+    for ((attempt = 1; attempt <= 10; attempt++)); do
+      pgrep -u "$target_uid" -x tint2 >/dev/null 2>&1 || break
+      sleep 0.05
+    done
+    pgrep -u "$target_uid" -x tint2 >/dev/null 2>&1 && pkill -KILL -u "$target_uid" -x tint2 2>/dev/null || true
+  fi
+
+  local env_args=(
+    "DISPLAY=$saved_display"
+    "HOME=$target_home"
+    "USER=$target_user"
+    "LOGNAME=$target_user"
+    "XDG_CURRENT_DESKTOP=LXQt"
+    "XDG_MENU_PREFIX=lxqt-"
+    "XDG_SESSION_TYPE=x11"
+  )
+  [[ -n "$saved_xauth" ]] && env_args+=("XAUTHORITY=$saved_xauth")
+  [[ -n "$saved_xdg_runtime" ]] && env_args+=("XDG_RUNTIME_DIR=$saved_xdg_runtime")
+  [[ -n "$saved_dbus" ]] && env_args+=("DBUS_SESSION_BUS_ADDRESS=$saved_dbus")
+
+  if [[ "$(id -u)" -eq 0 ]] && command -v setpriv >/dev/null 2>&1; then
+    setpriv --reuid="$target_uid" --regid="$target_gid" --init-groups \
+      env "${env_args[@]}" sh -c 'nohup tint2 </dev/null >/dev/null 2>&1 &'
+  elif [[ "$(id -u)" -eq 0 ]] && [[ -x /usr/sbin/runuser ]]; then
+    /usr/sbin/runuser -u "$target_user" -- \
+      env "${env_args[@]}" sh -c 'nohup tint2 </dev/null >/dev/null 2>&1 &'
+  elif [[ "$(id -u)" -eq "$target_uid" ]]; then
+    env "${env_args[@]}" sh -c 'nohup tint2 </dev/null >/dev/null 2>&1 &'
+  fi
+  echo "[on-connect] Repositioned tint2 dock for '$target_user' on $saved_display"
 }
 
 if [[ "${1:-}" == "--system-only" ]]; then
@@ -1071,7 +1144,7 @@ write_panel_conf() {
   write_user_file "$PANEL_CONF" 0644 <<EOF
 [General]
 __userfile__=true
-panels=panel1, panel2
+panels=panel1
 
 [panel1]
 alignment=center
@@ -1113,40 +1186,20 @@ type=quicklaunch
 apps\\1\\desktop=$SIGNOUT_LAUNCHER_PATH
 apps\\size=1
 
-[panel2]
-alignment=center
-position=Bottom
-height=84
-iconSize=72
-lineCount=1
-width=100
-width-percent=true
-reserve-space=true
-hidable=false
-opacity=0
-background-color=@Variant(\0\0\0\x43\x1\xff\xff\0\0\0\0\0\0\0\0)
-plugins=dock_spacer_left, dock_launchers, dock_spacer_right
-
-[dock_spacer_left]
-type=spacer
-size=0
-expandable=true
-spaceType=invisible
-
-[dock_launchers]
-type=quicklaunch
-apps\\1\\desktop=$CHROME_DESKTOP_PATH
-apps\\2\\desktop=$HOME_LAUNCHER_PATH
-apps\\3\\desktop=$EDITOR_DESKTOP_PATH
-apps\\4\\desktop=$ANTIGRAVITY_DESKTOP_PATH
-apps\\5\\desktop=$CLAUDE_DESKTOP_PATH
-apps\\size=5
-
-[dock_spacer_right]
-type=spacer
-size=0
-expandable=true
-spaceType=invisible
+# Backup bottom dock config (change panels=panel1, panel2 above to re-enable):
+# [panel2]
+# alignment=center
+# position=Bottom
+# height=84
+# iconSize=72
+# lineCount=1
+# width=100
+# width-percent=true
+# reserve-space=true
+# hidable=false
+# opacity=0
+# background-color=@Variant(\\0\\0\\0\\x43\\x1\\xff\\xff\\0\\0\\0\\0\\0\\0\\0\\0)
+# plugins=dock_spacer_left, dock_launchers, dock_spacer_right
 EOF
 }
 
@@ -1155,6 +1208,56 @@ if write_panel_conf; then
   PANEL_NEEDS_RELOAD=1
   echo "[on-connect] Applied LXQt panel.conf for '$USERNAME'"
 fi
+
+# 2b. Configure tint2 bottom launcher dock (~/.config/tint2/tint2rc)
+TINT2_CONF="$HOMEDIR/.config/tint2/tint2rc"
+write_user_file "$TINT2_CONF" 0644 <<EOF || true
+# Apigee AI Demos — tint2 bottom launcher dock
+# Background 1: transparent panel
+rounded = 12
+border_width = 0
+border_sides = TBLR
+background_color = #000000 0
+border_color = #000000 0
+background_color_hover = #000000 0
+border_color_hover = #000000 0
+background_color_pressed = #000000 0
+border_color_pressed = #000000 0
+
+# Panel geometry: auto-width centered at bottom
+panel_items = L
+panel_size = 0 76
+panel_margin = 0 8
+panel_padding = 8 4 8
+panel_background_id = 1
+wm_menu = 0
+panel_dock = 0
+panel_position = bottom center horizontal
+panel_layer = top
+panel_monitor = all
+panel_shrink = 1
+autohide = 0
+strut_policy = follow_size
+panel_window_name = tint2
+disable_transparency = 0
+mouse_effects = 1
+
+# Launcher icons: 64px, tight spacing
+launcher_padding = 6 4 6
+launcher_background_id = 0
+launcher_icon_background_id = 0
+launcher_icon_size = 64
+launcher_icon_asb = 100 0 0
+launcher_icon_theme = Adwaita
+launcher_icon_theme_override = 0
+startup_notifications = 1
+launcher_tooltip = 1
+launcher_item_app = $CHROME_DESKTOP_PATH
+launcher_item_app = $HOME_LAUNCHER_PATH
+launcher_item_app = $EDITOR_DESKTOP_PATH
+launcher_item_app = $ANTIGRAVITY_DESKTOP_PATH
+launcher_item_app = $CLAUDE_DESKTOP_PATH
+EOF
 
 # 3. Copy wallpaper.jpg into user's home directory & configure PCManFM-Qt (both lxqt and default profiles!)
 USER_WALLPAPER_DIR="$HOMEDIR/.local/share/backgrounds"
@@ -1311,6 +1414,18 @@ Type=Application
 Name=Picom Compositor
 Comment=Lightweight X11 compositor for panel transparency
 Exec=picom --backend xrender --no-fading-openclose --no-vsync
+Terminal=false
+Hidden=false
+NoDisplay=true
+EOF
+
+TINT2_AUTOSTART="$HOMEDIR/.config/autostart/tint2.desktop"
+write_user_file "$TINT2_AUTOSTART" 0644 <<'EOF' || true
+[Desktop Entry]
+Type=Application
+Name=tint2 Dock
+Comment=Bottom application launcher dock
+Exec=tint2
 Terminal=false
 Hidden=false
 NoDisplay=true

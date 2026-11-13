@@ -650,21 +650,23 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       "utf8"
     );
     expect(portalsConf).toContain("default=gtk");
-    expect(firstPass).toContain("panels=panel1, panel2");
+    expect(firstPass).toContain("panels=panel1");
     expect(firstPass).toContain("plugins=mainmenu, taskbar, spacer, kbindicator, signout");
     expect(firstPass).toContain("menu_file=/etc/xdg/menus/");
     expect(firstPass).toContain("spaceType=invisible");
     expect(firstPass).toContain("[signout]\nalignment=Right\ntype=quicklaunch");
-    expect(firstPass).toContain("[panel2]\nalignment=center\nposition=Bottom\nheight=84\niconSize=72");
-    expect(firstPass).toContain("opacity=0");
-    expect(firstPass).toContain("background-color=@Variant(");
-    expect(firstPass).toContain("plugins=dock_spacer_left, dock_launchers, dock_spacer_right");
-    expect(firstPass).toContain(`apps\\1\\desktop=${path.join(mockAppsDir, "google-chrome.desktop")}`);
-    expect(firstPass).toContain(`apps\\2\\desktop=${path.join(mockAppsDir, "apigee-user-home.desktop")}`);
-    expect(firstPass).toContain(`apps\\3\\desktop=${path.join(mockAppsDir, "featherpad.desktop")}`);
-    expect(firstPass).toContain(`apps\\4\\desktop=${path.join(mockAppsDir, "antigravity.desktop")}`);
-    expect(firstPass).toContain(`apps\\5\\desktop=${path.join(mockAppsDir, "com.anthropic.Claude.desktop")}`);
-    expect(firstPass).toContain("apps\\size=5");
+    expect(firstPass).toContain("# [panel2]");
+
+    const tint2Conf = await fs.readFile(path.join(freshHome, ".config", "tint2", "tint2rc"), "utf8");
+    expect(tint2Conf).toContain("panel_position = bottom center horizontal");
+    expect(tint2Conf).toContain("background_color = #000000 0");
+    expect(tint2Conf).toContain("launcher_icon_size = 64");
+    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "google-chrome.desktop")}`);
+    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "apigee-user-home.desktop")}`);
+    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "featherpad.desktop")}`);
+    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "antigravity.desktop")}`);
+    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "com.anthropic.Claude.desktop")}`);
+    expect(await Bun.file(path.join(autostartDir, "tint2.desktop")).exists()).toBe(true);
     expect(wallpaperStat.size).toBe(sourceWallpaperStat.size);
     expect(pcmanfmConf).toContain("QuickExec=true");
     expect(pcmanfmConf).toContain("WallpaperMode=zoom");
@@ -753,8 +755,9 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       },
     });
     const bobPanelConf = await fs.readFile(path.join(fallbackHome, ".config", "lxqt", "panel.conf"), "utf8");
-    expect(bobPanelConf).toContain("panels=panel1, panel2");
-    expect(bobPanelConf).toContain("apps\\size=5");
+    expect(bobPanelConf).toContain("panels=panel1");
+    const bobTint2Conf = await fs.readFile(path.join(fallbackHome, ".config", "tint2", "tint2rc"), "utf8");
+    expect(bobTint2Conf).toContain("launcher_icon_size = 64");
     const bobCodiumDesktop = await fs.readFile(
       path.join(fallbackHome, "Desktop", "codium.desktop"),
       "utf8"
