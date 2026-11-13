@@ -69,7 +69,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 
   return {
     port: parsePort(env.PORT, 8080),
-    host: env.HOST?.trim() || "127.0.0.1",
+    host: env.HOST?.trim() || "0.0.0.0",
     publicBaseUrl: env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, "") || null,
     trustProxy: parseBool(env.TRUST_PROXY, true),
     sessionSecret,

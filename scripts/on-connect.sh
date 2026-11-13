@@ -24,6 +24,160 @@ parse_json_string() {
   printf '%s\n' "$payload" | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
 }
 
+parse_claude_platform_field() {
+  local json="$1"
+  local platform="$2"
+  local field="$3"
+  json="$(printf '%s' "$json" | tr -d '\n\r\t' | sed 's/  */ /g')"
+  if [[ "$field" == "checksum" ]]; then
+    if [[ $json =~ \"$platform\"[[:space:]]*:[[:space:]]*[{][^{}]*\"checksum\"[[:space:]]*:[[:space:]]*\"([a-f0-9]{64})\" ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  elif [[ "$field" == "size" ]]; then
+    if [[ $json =~ \"$platform\"[[:space:]]*:[[:space:]]*[{][^{}]*\"size\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+apt_get() {
+  apt-get -o DPkg::Lock::Timeout=120 "$@"
+}
+
+ensure_user_in_kvm_group() {
+  local target_user="$1"
+  [[ "$(id -u)" -ne 0 ]] && return 0
+  command -v getent >/dev/null 2>&1 || return 0
+  command -v usermod >/dev/null 2>&1 || return 0
+  getent group kvm >/dev/null 2>&1 || return 0
+  getent passwd -- "$target_user" >/dev/null 2>&1 || return 0
+  if ! id -nG -- "$target_user" 2>/dev/null | tr ' ' '\n' | grep -qx 'kvm'; then
+    usermod -aG kvm -- "$target_user" 2>/dev/null \
+      && echo "[on-connect] Added '$target_user' to 'kvm' group for Claude Cowork VM sandboxing" || true
+  fi
+}
+
+install_or_update_claude_code() {
+  local claude_arch="$1"
+  local claude_bin="${ON_CONNECT_CLAUDE_BIN:-/usr/local/bin/claude}"
+  local claude_share_dir="${ON_CONNECT_CLAUDE_SHARE_DIR:-/usr/local/share/claude-code}"
+  local claude_etc_dir="${ON_CONNECT_CLAUDE_ETC_DIR:-/etc/claude-code}"
+  local claude_base_url="${ON_CONNECT_CLAUDE_RELEASES_URL:-https://downloads.claude.ai/claude-code-releases}"
+  local claude_install_script_url="${ON_CONNECT_CLAUDE_INSTALL_SCRIPT_URL:-https://claude.ai/install.sh}"
+
+  local claude_platform="linux-${claude_arch}"
+  if [[ -f /lib/libc.musl-x86_64.so.1 || -f /lib/libc.musl-aarch64.so.1 ]] || (command -v ldd >/dev/null 2>&1 && ldd /bin/ls 2>&1 | grep -q musl); then
+    claude_platform="linux-${claude_arch}-musl"
+  fi
+
+  install -d -m 0755 "$(dirname -- "$claude_bin")" "$claude_share_dir" "$claude_etc_dir"
+
+  local claude_ver installed_claude_ver
+  claude_ver="$(curl -fsSL --max-time 8 "${claude_base_url}/latest" 2>/dev/null | tr -d '[:space:]' || true)"
+  installed_claude_ver="$(cat "${claude_share_dir}/cli-version" 2>/dev/null || true)"
+
+  if [[ "$claude_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$ ]] && [[ ! -x "$claude_bin" || "$installed_claude_ver" != "$claude_ver" ]]; then
+    echo "[status] Installing Claude Code v${claude_ver}..."
+    local claude_manifest claude_sha256 claude_size
+    claude_manifest="$(curl -fsSL --max-time 15 "${claude_base_url}/${claude_ver}/manifest.json" 2>/dev/null || true)"
+    claude_sha256="$(parse_claude_platform_field "$claude_manifest" "$claude_platform" "checksum" || true)"
+    claude_size="$(parse_claude_platform_field "$claude_manifest" "$claude_platform" "size" || true)"
+
+    if [[ "$claude_sha256" =~ ^[a-f0-9]{64}$ ]]; then
+      local claude_tmp claude_verified=0
+      claude_tmp="$(mktemp -d "${TMPDIR:-/tmp}/claude-code-install.XXXXXX")"
+
+      # Prefer zstd-compressed payload (~3x smaller download) when zstd is available
+      if command -v zstd >/dev/null 2>&1 && [[ "$claude_size" =~ ^[1-9][0-9]*$ ]]; then
+        local zst_manifest zst_sha256
+        zst_manifest="$(curl -fsSL --max-time 15 "${claude_base_url}/${claude_ver}/manifest.zst.json" 2>/dev/null || true)"
+        zst_sha256="$(parse_claude_platform_field "$zst_manifest" "$claude_platform" "checksum" || true)"
+        if [[ "$zst_sha256" =~ ^[a-f0-9]{64}$ ]] && curl -fsSL -o "$claude_tmp/claude.zst" "${claude_base_url}/${claude_ver}/${claude_platform}/claude.zst"; then
+          local actual_zst_sha
+          actual_zst_sha="$(sha256sum "$claude_tmp/claude.zst" | cut -d' ' -f1)"
+          if [[ "$actual_zst_sha" == "$zst_sha256" ]]; then
+            zstd -d -q -c "$claude_tmp/claude.zst" 2>/dev/null | head -c "$claude_size" >"$claude_tmp/claude" || true
+            local actual_raw_sha
+            actual_raw_sha="$(sha256sum "$claude_tmp/claude" | cut -d' ' -f1)"
+            if [[ "$actual_raw_sha" == "$claude_sha256" ]]; then
+              claude_verified=1
+            fi
+          fi
+        fi
+        rm -f -- "$claude_tmp/claude.zst"
+      fi
+
+      if [[ "$claude_verified" -eq 0 ]]; then
+        if curl -fsSL -o "$claude_tmp/claude" "${claude_base_url}/${claude_ver}/${claude_platform}/claude"; then
+          local actual_sha
+          actual_sha="$(sha256sum "$claude_tmp/claude" | cut -d' ' -f1)"
+          if [[ "$actual_sha" == "$claude_sha256" ]]; then
+            claude_verified=1
+          else
+            echo "[on-connect] Warning: SHA-256 mismatch for Claude Code v${claude_ver} (${claude_platform})" >&2
+          fi
+        else
+          echo "[on-connect] Warning: failed downloading Claude Code v${claude_ver} (${claude_platform})" >&2
+        fi
+      fi
+
+      if [[ "$claude_verified" -eq 1 ]]; then
+        local claude_stage
+        claude_stage="$(dirname -- "$claude_bin")/.claude.tmp.$$"
+        cp -f -- "$claude_tmp/claude" "$claude_stage"
+        chmod 0755 -- "$claude_stage"
+        if [[ "$(id -u)" -eq 0 ]]; then
+          chown root:root -- "$claude_stage"
+        fi
+        mv -f -- "$claude_stage" "$claude_bin"
+        printf '%s\n' "$claude_ver" >"${claude_share_dir}/cli-version"
+        chmod 0644 "${claude_share_dir}/cli-version"
+        echo "[on-connect] Installed Claude Code v${claude_ver} -> ${claude_bin}"
+      fi
+      rm -rf -- "$claude_tmp"
+    else
+      echo "[on-connect] Warning: platform ${claude_platform} missing from Claude Code v${claude_ver} manifest" >&2
+    fi
+  elif [[ ! -x "$claude_bin" ]]; then
+    echo "[status] Installing Claude Code..."
+    local claude_fallback_home
+    claude_fallback_home="$(mktemp -d "${TMPDIR:-/tmp}/claude-code-home.XXXXXX")"
+    if curl -fsSL "$claude_install_script_url" | env HOME="$claude_fallback_home" CLAUDE_INSTALL_ALLOW_SUDO=1 bash; then
+      if [[ -x "$claude_fallback_home/.local/bin/claude" ]]; then
+        local claude_stage
+        claude_stage="$(dirname -- "$claude_bin")/.claude.tmp.$$"
+        cp -Lf -- "$claude_fallback_home/.local/bin/claude" "$claude_stage"
+        chmod 0755 -- "$claude_stage"
+        if [[ "$(id -u)" -eq 0 ]]; then
+          chown root:root -- "$claude_stage"
+        fi
+        mv -f -- "$claude_stage" "$claude_bin"
+        echo "[on-connect] Installed Claude Code via fallback installer -> ${claude_bin}"
+      fi
+    else
+      echo "[on-connect] Warning: fallback Claude Code installer failed" >&2
+    fi
+    rm -rf -- "$claude_fallback_home"
+  fi
+
+  # Prevent non-root users from failing on self-updates against root-owned /usr/local/bin/claude
+  # or duplicating 350MB+ binaries inside every user's home directory
+  local managed_settings="${claude_etc_dir}/managed-settings.json"
+  if [[ ! -f "$managed_settings" ]]; then
+    cat >"$managed_settings" <<'EOF'
+{
+  "env": {
+    "DISABLE_AUTOUPDATER": "1"
+  }
+}
+EOF
+    chmod 0644 "$managed_settings"
+  fi
+}
+
 find_existing_desktop() {
   local cand
   for cand in "$@"; do
@@ -95,41 +249,45 @@ install_or_update_system_tools() {
 
   export DEBIAN_FRONTEND=noninteractive
 
-  local uname_m deb_arch cli_arch app_platform
+  local uname_m deb_arch cli_arch claude_arch app_platform
   uname_m="$(uname -m)"
   deb_arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
   case "$uname_m" in
     x86_64|amd64)
       cli_arch="amd64"
+      claude_arch="x64"
       app_platform="linux-x64"
       ;;
     aarch64|arm64)
       cli_arch="arm64"
+      claude_arch="arm64"
       app_platform="linux-arm"
       ;;
     *)
       cli_arch="amd64"
+      claude_arch="x64"
       app_platform="linux-x64"
       ;;
   esac
 
-  # 1a. Base desktop packages: Plank, QTerminal, PCManFM-Qt, FeatherPad, LXQt menu data, GIO/GVFS, dconf & GTK portal
+  # 1a. Base desktop packages: Plank, QTerminal, PCManFM-Qt, FeatherPad, LXQt menu data, Adwaita icons, GIO/GVFS, dconf, zstd, XDG utils & GTK portal
   local missing_base=0
   local cmd
-  for cmd in curl gpg plank qterminal pcmanfm-qt featherpad lxqt-leave gio dconf dbus-update-activation-environment; do
+  for cmd in curl gpg zstd xdg-open update-desktop-database plank qterminal pcmanfm-qt featherpad lxqt-leave gio dconf dbus-update-activation-environment; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
     fi
   done
-  if [[ ! -f /etc/xdg/menus/lxqt-applications.menu || ! -f /usr/share/xdg-desktop-portal/portals/gtk.portal ]]; then
+  if [[ ! -f /etc/xdg/menus/lxqt-applications.menu || ! -f /usr/share/xdg-desktop-portal/portals/gtk.portal || ! -f /usr/share/icons/Adwaita/index.theme ]]; then
     missing_base=1
   fi
   if [[ "$missing_base" -eq 1 ]]; then
     echo "[status] Installing Plank, LXQt menu data, Terminal, Text Editor & desktop utilities..."
-    apt-get update -qq
-    apt-get install -y -qq --no-install-recommends \
-      ca-certificates curl gpg plank qterminal pcmanfm-qt featherpad \
+    apt_get update -qq
+    apt_get install -y -qq --no-install-recommends \
+      ca-certificates curl gpg zstd xdg-utils desktop-file-utils \
+      adwaita-icon-theme plank qterminal pcmanfm-qt featherpad \
       lxqt-menu-data lxqt-session libglib2.0-bin gvfs dconf-cli \
       dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
@@ -149,8 +307,8 @@ Components: main
 Architectures: amd64 arm64
 Signed-by: /usr/share/keyrings/vscodium-archive-keyring.gpg
 EOF
-    apt-get update -qq
-    apt-get install -y -qq codium
+    apt_get update -qq
+    apt_get install -y -qq codium
   fi
 
   # 1c. Google Chrome (google-chrome-stable on amd64; chromium fallback on arm64)
@@ -163,17 +321,19 @@ EOF
       chmod 0644 /etc/apt/keyrings/google-chrome.gpg
       echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
         >/etc/apt/sources.list.d/google-chrome.list
-      apt-get update -qq
-      apt-get install -y -qq google-chrome-stable
+      apt_get update -qq
+      apt_get install -y -qq google-chrome-stable
     else
-      apt-get update -qq
-      apt-get install -y -qq chromium
+      apt_get update -qq
+      apt_get install -y -qq chromium
     fi
   fi
 
   install -d -m 0755 \
     /usr/local/bin \
     /usr/local/share/antigravity \
+    /usr/local/share/claude-code \
+    /etc/claude-code \
     /usr/share/pixmaps \
     /usr/share/icons/hicolor/256x256/apps \
     /usr/share/applications \
@@ -351,7 +511,89 @@ EOF
     chmod 0644 /usr/share/applications/antigravity-ide.desktop
   fi
 
-  # 1g. Shared "Home" launcher (Plank dock) & "Sign Out" launcher (LXQt top panel right side)
+  # 1g. Claude Code CLI (installed globally at /usr/local/bin/claude for all users)
+  install_or_update_claude_code "$claude_arch"
+
+  # 1h. Claude Desktop & Cowork (installed from Anthropic's official APT repository for all users)
+  if [[ "$deb_arch" == "amd64" || "$deb_arch" == "arm64" ]]; then
+    local claude_keyring="/usr/share/keyrings/claude-desktop-archive-keyring.asc"
+    local claude_sources="/etc/apt/sources.list.d/claude-desktop.list"
+    local claude_key_url="${ON_CONNECT_CLAUDE_DESKTOP_KEY_URL:-https://downloads.claude.ai/claude-desktop/key.asc}"
+    local claude_apt_url="${ON_CONNECT_CLAUDE_DESKTOP_APT_URL:-https://downloads.claude.ai/claude-desktop/apt/stable}"
+
+    if ! command -v claude-desktop >/dev/null 2>&1 || [[ "${ON_CONNECT_SYSTEM_BOOTSTRAP:-0}" == "1" ]]; then
+      install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d
+      if [[ ! -s "$claude_keyring" ]]; then
+        if curl -fsSL --max-time 15 -o "${claude_keyring}.tmp.$$" "$claude_key_url"; then
+          chmod 0644 "${claude_keyring}.tmp.$$"
+          mv -f -- "${claude_keyring}.tmp.$$" "$claude_keyring"
+        else
+          rm -f -- "${claude_keyring}.tmp.$$"
+          echo "[on-connect] Warning: failed downloading Claude Desktop PGP key from $claude_key_url" >&2
+        fi
+      fi
+
+      if [[ -s "$claude_keyring" && ! -f "$claude_sources" ]]; then
+        cat >"$claude_sources" <<EOF
+### Managed by the claude-desktop package.
+### Set CLAUDE_DESKTOP_ADD_REPO="true"|"false" in /etc/default/claude-desktop
+### to force this entry on or off; remove this file too when opting out.
+deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/claude-desktop-archive-keyring.asc] ${claude_apt_url} stable main
+EOF
+        chmod 0644 "$claude_sources"
+      fi
+
+      if [[ -s "$claude_keyring" && -f "$claude_sources" ]]; then
+        if ! command -v claude-desktop >/dev/null 2>&1; then
+          echo "[status] Installing Claude Desktop (Cowork)..."
+          if apt_get update -qq && apt_get install -y -qq --install-recommends claude-desktop; then
+            echo "[on-connect] Installed Claude Desktop (with Cowork VM/sandbox dependencies)"
+          else
+            echo "[on-connect] Warning: failed installing claude-desktop via APT" >&2
+          fi
+        elif [[ "${ON_CONNECT_SYSTEM_BOOTSTRAP:-0}" == "1" ]]; then
+          # On root service startup, refresh Anthropic's APT repo and upgrade claude-desktop if newer
+          if (apt_get update -qq -o Dir::Etc::sourcelist="sources.list.d/claude-desktop.list" -o Dir::Etc::sourceparts="-" -o Acquire::Languages="none" 2>/dev/null || apt_get update -qq) \
+            && apt_get install -y -qq --install-recommends claude-desktop; then
+            echo "[on-connect] Verified/updated Claude Desktop (Cowork)"
+          else
+            echo "[on-connect] Warning: failed checking Claude Desktop APT updates" >&2
+          fi
+        fi
+      fi
+    fi
+
+    if [[ -s /usr/share/icons/hicolor/256x256/apps/claude-desktop.png && ! -s /usr/share/pixmaps/claude-desktop.png ]]; then
+      install -m 0644 /usr/share/icons/hicolor/256x256/apps/claude-desktop.png /usr/share/pixmaps/claude-desktop.png
+      command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+    fi
+
+    # Ensure existing local VM accounts can access /dev/kvm for Claude Cowork's QEMU/KVM sandbox
+    if command -v getent >/dev/null 2>&1 && getent group kvm >/dev/null 2>&1 && [[ -r /etc/passwd ]]; then
+      local pw_user pw_uid pw_shell
+      while IFS=: read -r pw_user _ pw_uid _ _ _ pw_shell; do
+        [[ "$pw_uid" =~ ^[0-9]+$ ]] || continue
+        if (( pw_uid >= 1000 && pw_uid < 60000 )); then
+          case "$pw_shell" in
+            */nologin|*/false|/bin/sync) continue ;;
+          esac
+          ensure_user_in_kvm_group "$pw_user"
+        fi
+      done </etc/passwd
+    fi
+  fi
+
+  # Refresh desktop MIME & icon caches so all installed apps and icons resolve immediately on first login
+  if command -v update-desktop-database >/dev/null 2>&1 && [[ -d /usr/share/applications ]]; then
+    update-desktop-database -q /usr/share/applications 2>/dev/null || true
+  fi
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    for icon_dir in /usr/share/icons/hicolor /usr/share/icons/Adwaita; do
+      [[ -f "$icon_dir/index.theme" ]] && gtk-update-icon-cache -q -f -t "$icon_dir" 2>/dev/null || true
+    done
+  fi
+
+  # 1i. Shared "Home" launcher (Plank dock) & "Sign Out" launcher (LXQt top panel right side)
   cat >/usr/share/applications/apigee-user-home.desktop <<'EOF'
 [Desktop Entry]
 Version=1.0
@@ -380,7 +622,7 @@ Categories=System;
 EOF
   chmod 0644 /usr/share/applications/apigee-signout.desktop
 
-  # 1h. System-wide locked dconf database for Plank so every user gets identical dock settings & icons
+  # 1j. System-wide locked dconf database for Plank so every user gets identical dock settings & icons
   if command -v dconf >/dev/null 2>&1; then
     install -d -m 0755 /etc/dconf/profile /etc/dconf/db/local.d /etc/dconf/db/local.d/locks
     cat >/etc/dconf/profile/user <<'EOF'
@@ -391,7 +633,7 @@ EOF
 
     cat >/etc/dconf/db/local.d/00-apigee-plank <<'EOF'
 [net/launchpad/plank/docks/dock1]
-dock-items=['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem']
+dock-items=['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem', '07-claude.dockitem']
 show-dock-item=false
 pinned-only=false
 hide-mode='none'
@@ -404,17 +646,27 @@ EOF
     cat >/etc/dconf/db/local.d/locks/00-apigee-plank <<'EOF'
 /net/launchpad/plank/docks/dock1/dock-items
 /net/launchpad/plank/docks/dock1/show-dock-item
+/net/launchpad/plank/docks/dock1/pinned-only
+/net/launchpad/plank/docks/dock1/hide-mode
+/net/launchpad/plank/docks/dock1/position
+/net/launchpad/plank/docks/dock1/alignment
+/net/launchpad/plank/docks/dock1/items-alignment
 EOF
     chmod 0644 /etc/dconf/db/local.d/locks/00-apigee-plank
     dconf update 2>/dev/null || true
   fi
 
-  # 1i. Fast Plank & LXQt session startup helpers (prevents 2-3 minute D-Bus/portal/bamf timeouts in xrdp)
+  # 1k. Fast Plank & LXQt session startup helpers (prevents 2-3 minute D-Bus/portal/bamf timeouts in xrdp)
   cat >/usr/local/bin/apigee-start-plank <<'EOF'
 #!/usr/bin/env bash
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-LXQt}"
 export XDG_MENU_PREFIX="${XDG_MENU_PREFIX:-lxqt-}"
 export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+
+IMMEDIATE=0
+if [[ "${1:-}" == "--immediate" ]]; then
+  IMMEDIATE=1
+fi
 
 if command -v flock >/dev/null 2>&1; then
   LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/apigee-plank-$(id -u).lock"
@@ -434,24 +686,40 @@ if [[ -n "${DISPLAY:-}" ]]; then
   fi
 fi
 
-# 2. Enforce exact 6-item Plank dock ordering via dconf before Plank reads settings
-if command -v dconf >/dev/null 2>&1; then
-  dconf write /net/launchpad/plank/docks/dock1/dock-items \
-    "['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem']" 2>/dev/null || true
-  dconf write /net/launchpad/plank/docks/dock1/show-dock-item "false" 2>/dev/null || true
-  dconf write /net/launchpad/plank/docks/dock1/pinned-only "false" 2>/dev/null || true
+# 2. On cold session startup, wait briefly for the WM & LXQt panel so Plank doesn't race X11/GTK/dconf init
+if [[ "$IMMEDIATE" -eq 0 ]] && command -v pgrep >/dev/null 2>&1; then
+  uid_num="$(id -u)"
+  for _ in $(seq 1 40); do
+    if (pgrep -u "$uid_num" -x openbox >/dev/null 2>&1 || pgrep -u "$uid_num" -x xfwm4 >/dev/null 2>&1) \
+      && pgrep -u "$uid_num" -x lxqt-panel >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+  sleep 0.75
 fi
 
-# 3. Pre-start bamfdaemon directly on the live X11 DISPLAY so libbamf3 never blocks on systemd D-Bus activation
+# 3. Pre-start bamfdaemon directly on the live X11 DISPLAY and wait until it claims D-Bus so
+#    libbamf3 never times out or misses .desktop entries while Plank initializes its dock items.
 #    Close FD 8 in child so bamfdaemon never holds the Plank flock after Plank restarts on resize!
 if ! pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1; then
   for bamf_bin in /usr/libexec/bamf/bamfdaemon /usr/lib/*/bamf/bamfdaemon; do
     if [[ -x "$bamf_bin" ]]; then
       nohup "$bamf_bin" </dev/null >/dev/null 2>&1 8>&- &
-      sleep 0.15
       break
     fi
   done
+  if command -v gdbus >/dev/null 2>&1; then
+    for _ in $(seq 1 20); do
+      if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.NameHasOwner org.ayatana.bamf 2>/dev/null | grep -q 'true'; then
+        break
+      fi
+      sleep 0.1
+    done
+  else
+    sleep 0.5
+  fi
 fi
 
 # 4. Launch Plank without xdg-desktop-portal or AT-SPI D-Bus probes (eliminates 120s portal timeout)
@@ -489,7 +757,7 @@ ensure_panel_and_dock_running() {
     nohup lxqt-panel </dev/null >/dev/null 2>&1 &
   fi
   if [[ -x /usr/local/bin/apigee-start-plank ]] && ! pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
-    nohup /usr/local/bin/apigee-start-plank </dev/null >/dev/null 2>&1 &
+    nohup /usr/local/bin/apigee-start-plank --immediate </dev/null >/dev/null 2>&1 &
   fi
 }
 
@@ -498,7 +766,7 @@ if [[ "${1:-}" == "--Immediate" ]]; then
   ensure_panel_and_dock_running
 else
   (
-    sleep 1
+    sleep 3
     apply_trust
     ensure_panel_and_dock_running
   ) </dev/null >/dev/null 2>&1 &
@@ -806,7 +1074,7 @@ reposition_user_plank() {
   [[ -n "$saved_xdg_runtime" ]] && env_args+=("XDG_RUNTIME_DIR=$saved_xdg_runtime")
   [[ -n "$saved_dbus" ]] && env_args+=("DBUS_SESSION_BUS_ADDRESS=$saved_dbus")
 
-  local start_cmd=("/usr/local/bin/apigee-start-plank")
+  local start_cmd=("/usr/local/bin/apigee-start-plank" "--immediate")
   if [[ ! -x "/usr/local/bin/apigee-start-plank" ]]; then
     start_cmd=("env" "NO_AT_BRIDGE=1" "GTK_USE_PORTAL=0" "GDK_DEBUG=no-portals" "GIO_USE_PORTALS=0" "plank")
   fi
@@ -824,8 +1092,17 @@ reposition_user_plank() {
 }
 
 if [[ "${1:-}" == "--system-only" ]]; then
-  run_serialized_system_install
+  ON_CONNECT_SYSTEM_BOOTSTRAP=1 run_serialized_system_install
   echo "[on-connect] System-wide tool bootstrap complete"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--install-claude-code-only" ]]; then
+  TEST_ARCH="x64"
+  case "$(uname -m)" in
+    aarch64|arm64) TEST_ARCH="arm64" ;;
+  esac
+  install_or_update_claude_code "${2:-$TEST_ARCH}"
   exit 0
 fi
 
@@ -891,6 +1168,9 @@ write_user_file() {
 }
 
 run_serialized_system_install
+
+# Ensure user belongs to 'kvm' group before xrdp login so Claude Cowork's QEMU/KVM sandbox works
+ensure_user_in_kvm_group "$USERNAME"
 
 # Always sign out any previous/disconnected xrdp desktop session BEFORE writing configs
 # so xrdp-sesman starts a fresh desktop sign-in and dying panel/desktop processes cannot
@@ -1099,7 +1379,14 @@ EOF
 update_pcmanfm_profile "lxqt"
 update_pcmanfm_profile "default"
 
-# 4. Configure XDG portal backend & Plank/Session-Init XDG autostart (~/.config/autostart/)
+# 4. Configure XDG portal backend, GTK3 icon theme fallback & Plank/Session-Init XDG autostart (~/.config/autostart/)
+if [[ -f /usr/share/icons/Adwaita/index.theme && ! -f "$HOMEDIR/.config/gtk-3.0/settings.ini" ]]; then
+  write_user_file "$HOMEDIR/.config/gtk-3.0/settings.ini" 0644 <<'EOF' || true
+[Settings]
+gtk-icon-theme-name=Adwaita
+EOF
+fi
+
 PORTALS_CONF="$HOMEDIR/.config/xdg-desktop-portal/portals.conf"
 write_user_file "$PORTALS_CONF" 0644 <<'EOF' || true
 [preferred]
@@ -1172,8 +1459,10 @@ CODIUM_DESKTOP_PATH="$(resolve_or_create_desktop "codium" "VSCodium" "codium %F"
   codium.desktop vscodium.desktop com.vscodium.codium.desktop)"
 ANTIGRAVITY_DESKTOP_PATH="$(resolve_or_create_desktop "antigravity" "Antigravity" "/opt/antigravity/antigravity %U" "antigravity" \
   antigravity.desktop)"
+CLAUDE_DESKTOP_PATH="$(resolve_or_create_desktop "claude" "Claude" "claude-desktop %U" "claude-desktop" \
+  com.anthropic.Claude.desktop claude-desktop.desktop)"
 
-# Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity (remove old/url-handler shortcuts).
+# Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity, Claude (remove old/url-handler shortcuts).
 # Written as Type=Link shortcuts targeting /usr/share/applications/*.desktop: in LXQt libfm-qt
 # (FileInfo::isExecutableType), Type=Link entries targeting /usr/share/* are inherently trusted on disk
 # without needing GVFS metadata, avoiding both the '!' untrusted emblem and symlink arrow emblem.
@@ -1226,17 +1515,18 @@ write_desktop_shortcut "$TERM_DESKTOP_PATH" "$DESKTOP_DIR/qterminal.desktop"
 write_desktop_shortcut "$CHROME_DESKTOP_PATH" "$DESKTOP_DIR/google-chrome.desktop"
 write_desktop_shortcut "$CODIUM_DESKTOP_PATH" "$DESKTOP_DIR/codium.desktop" "VSCodium"
 write_desktop_shortcut "$ANTIGRAVITY_DESKTOP_PATH" "$DESKTOP_DIR/antigravity.desktop" "Antigravity"
+write_desktop_shortcut "$CLAUDE_DESKTOP_PATH" "$DESKTOP_DIR/claude.desktop" "Claude"
 
 # Remove any other stale .desktop shortcut names left in ~/Desktop from previous runs
 for existing_desk in "$DESKTOP_DIR"/*.desktop; do
   [[ ! -e "$existing_desk" ]] && continue
   case "$(basename -- "$existing_desk")" in
-    qterminal.desktop|google-chrome.desktop|codium.desktop|antigravity.desktop) ;;
+    qterminal.desktop|google-chrome.desktop|codium.desktop|antigravity.desktop|claude.desktop) ;;
     *) rm -f -- "$existing_desk" ;;
   esac
 done
 
-# Exact Plank dock items: Home, Chrome, VSCodium, Terminal, Text Editor, Antigravity
+# Exact Plank dock items: Home, Chrome, VSCodium, Terminal, Text Editor, Antigravity, Claude
 declare -A EXPECTED_DOCKITEMS=()
 PLANK_CHANGED=0
 
@@ -1265,6 +1555,7 @@ add_plank_item 3 "codium" "$CODIUM_DESKTOP_PATH"
 add_plank_item 4 "terminal" "$TERM_DESKTOP_PATH"
 add_plank_item 5 "text-editor" "$EDITOR_DESKTOP_PATH"
 add_plank_item 6 "antigravity" "$ANTIGRAVITY_DESKTOP_PATH"
+add_plank_item 7 "claude" "$CLAUDE_DESKTOP_PATH"
 
 # Remove ALL other .dockitem files (including Plank's unnumbered first-run defaults like pcmanfm-qt/clock)
 for existing_item in "$PLANK_LAUNCHERS_DIR"/*.dockitem; do
@@ -1277,14 +1568,14 @@ for existing_item in "$PLANK_LAUNCHERS_DIR"/*.dockitem; do
 done
 
 # Pre-compile per-user ~/.config/dconf/user offline before xrdp starts so even on first login
-# Plank immediately sees all 6 dock-items without running make_default_items()
+# Plank immediately sees all 7 dock-items without running make_default_items()
 if command -v dconf >/dev/null 2>&1; then
   ensure_user_dir "$HOMEDIR/.config/dconf"
   DCONF_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/apigee-dconf.XXXXXX")"
   mkdir -p -- "$DCONF_STAGE/src.d"
   cat >"$DCONF_STAGE/src.d/00-plank" <<'EOF'
 [net/launchpad/plank/docks/dock1]
-dock-items=['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem']
+dock-items=['01-home.dockitem', '02-chrome.dockitem', '03-codium.dockitem', '04-terminal.dockitem', '05-text-editor.dockitem', '06-antigravity.dockitem', '07-claude.dockitem']
 show-dock-item=false
 pinned-only=false
 hide-mode='none'
@@ -1298,8 +1589,17 @@ EOF
   rm -rf -- "$DCONF_STAGE"
 fi
 
-# Keep ~/.local/bin/agy aligned with system /usr/local/bin/agy if user had an older local copy
+# Keep ~/.local/bin/agy and ~/.local/bin/claude aligned with system binaries if user had older local copies
 if [[ -x /usr/local/bin/agy && -e "$HOMEDIR/.local/bin/agy" && ! -L "$HOMEDIR/.local/bin/agy" ]]; then
   ln -sf /usr/local/bin/agy "$HOMEDIR/.local/bin/agy"
-  [[ "$(id -u)" -eq 0 ]] && chown -h "$USER_UID:$USER_GID" -- "$HOMEDIR/.local/bin/agy"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown -h "$USER_UID:$USER_GID" -- "$HOMEDIR/.local/bin/agy"
+  fi
+fi
+SYS_CLAUDE_BIN="${ON_CONNECT_CLAUDE_BIN:-/usr/local/bin/claude}"
+if [[ -x "$SYS_CLAUDE_BIN" && -e "$HOMEDIR/.local/bin/claude" && ! -L "$HOMEDIR/.local/bin/claude" ]]; then
+  ln -sf "$SYS_CLAUDE_BIN" "$HOMEDIR/.local/bin/claude"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown -h "$USER_UID:$USER_GID" -- "$HOMEDIR/.local/bin/claude"
+  fi
 fi

@@ -88,12 +88,27 @@ function applySecurityHeaders(headers: Headers, cspNonce?: string): void {
   );
 }
 
-function jsonResponse(data: unknown, status = 200, extraHeaders?: HeadersInit): Response {
+const HEALTH_CHECK_PATHS = new Set([
+  "/api/health",
+  "/health",
+  "/healthz",
+  "/livez",
+  "/readyz",
+  "/ping",
+  "/status",
+]);
+
+function jsonResponse(
+  data: unknown,
+  status = 200,
+  extraHeaders?: HeadersInit,
+  headOnly = false
+): Response {
   const headers = new Headers(extraHeaders);
   headers.set("Content-Type", "application/json; charset=utf-8");
   headers.set("Cache-Control", "no-store");
   applySecurityHeaders(headers);
-  return new Response(JSON.stringify(data), { status, headers });
+  return new Response(headOnly ? null : JSON.stringify(data), { status, headers });
 }
 
 function isAllowedFetchMetadata(req: Request, pathname: string): boolean {
@@ -149,220 +164,239 @@ export function createAppServer(
     hostname: config.host,
     port: config.port,
     async fetch(req, srv) {
+      const startedAt = performance.now();
       const url = new URL(req.url);
       const pathname = url.pathname;
+      const isRdpWs = pathname === "/api/rdp/ws";
 
-      if (!isAllowedFetchMetadata(req, pathname)) {
-        return jsonResponse({ error: "Cross-site request blocked" }, 403);
-      }
-
-      // WebSocket endpoint for browser IronRDP WASM <-> local xrdp
-      if (pathname === "/api/rdp/ws") {
-        if (!verifyWsOrigin(req, config)) {
-          console.warn(
-            `${new Date().toISOString()} [rdp] Blocked WebSocket upgrade: origin mismatch (origin=${req.headers.get("origin")}, expected=${getExternalOrigin(req, config)})`
-          );
-          return jsonResponse({ error: "Invalid WebSocket origin" }, 403);
+      const handleHttpRequest = async (): Promise<Response | undefined> => {
+        if (!isAllowedFetchMetadata(req, pathname)) {
+          return jsonResponse({ error: "Cross-site request blocked" }, 403);
         }
 
-        const resolved = resolveRequestIdentity(req, config);
-        if (!resolved || "error" in resolved) {
-          console.warn(
-            `${new Date().toISOString()} [rdp] Blocked WebSocket upgrade: ${
-              resolved && "error" in resolved ? resolved.error : "no IAP header or ?user= session"
-            }`
-          );
-          return jsonResponse({ error: "Authentication required" }, 401);
+        // WebSocket endpoint for browser IronRDP WASM <-> local xrdp
+        if (isRdpWs) {
+          if (!verifyWsOrigin(req, config)) {
+            console.warn(
+              `${new Date().toISOString()} [rdp] Blocked WebSocket upgrade: origin mismatch (origin=${req.headers.get("origin")}, expected=${getExternalOrigin(req, config)})`
+            );
+            return jsonResponse({ error: "Invalid WebSocket origin" }, 403);
+          }
+
+          const resolved = resolveRequestIdentity(req, config);
+          if (!resolved || "error" in resolved) {
+            console.warn(
+              `${new Date().toISOString()} [rdp] Blocked WebSocket upgrade: ${
+                resolved && "error" in resolved ? resolved.error : "no IAP header or ?user= session"
+              }`
+            );
+            return jsonResponse({ error: "Authentication required" }, 401);
+          }
+
+          const wsCtx = createRdpWsContext(resolved.session, config);
+          const upgraded = srv.upgrade(req, { data: wsCtx });
+          if (upgraded) {
+            rdpLog(
+              wsCtx,
+              `WebSocket upgraded (email=${resolved.session.email}, source=${resolved.source})`
+            );
+            return undefined;
+          }
+          return jsonResponse({ error: "WebSocket upgrade failed" }, 400);
         }
 
-        const wsCtx = createRdpWsContext(resolved.session, config);
-        const upgraded = srv.upgrade(req, { data: wsCtx });
-        if (upgraded) {
-          rdpLog(
-            wsCtx,
-            `WebSocket upgraded (email=${resolved.session.email}, source=${resolved.source})`
-          );
-          return undefined;
-        }
-        return jsonResponse({ error: "WebSocket upgrade failed" }, 400);
-      }
-
-      // Health check
-      if (pathname === "/api/health" && req.method === "GET") {
-        return jsonResponse({ ok: true });
-      }
-
-      // Live host VM CPU & memory usage telemetry
-      if (pathname === "/api/metrics" && req.method === "GET") {
-        return jsonResponse({ metrics: hostMetrics.getSnapshot() });
-      }
-
-      // Identity lookup (read-only: inspects ?user=..., GCP IAP header, or session cookie)
-      if (pathname === "/api/me" && req.method === "GET") {
-        const metrics = hostMetrics.getSnapshot();
-        const resolved = resolveRequestIdentity(req, config);
-        if (!resolved) {
-          return jsonResponse({ authenticated: false, metrics });
-        }
-        if ("error" in resolved) {
-          return jsonResponse({ authenticated: false, error: resolved.error, metrics }, 400);
+        // Health checks (GET and HEAD across common probe paths)
+        if (HEALTH_CHECK_PATHS.has(pathname) && (req.method === "GET" || req.method === "HEAD")) {
+          return jsonResponse({ ok: true }, 200, undefined, req.method === "HEAD");
         }
 
-        const extraHeaders = resolved.setCookie ? { "Set-Cookie": resolved.setCookie } : undefined;
-        return jsonResponse(
-          {
-            authenticated: true,
-            authSource: resolved.source,
-            csrfToken: resolved.session.csrfToken,
-            user: {
-              email: resolved.session.email,
-              username: resolved.session.username,
-            },
-            demos: DEMO_CATALOG,
-            metrics,
-          },
-          200,
-          extraHeaders
-        );
-      }
-
-      // Automatic Linux user creation + users.yaml password generation/retrieval
-      if (pathname === "/api/vm-user/ensure" && req.method === "POST") {
-        const resolved = resolveRequestIdentity(req, config);
-        if (!resolved || "error" in resolved) {
-          return jsonResponse({ error: "Authentication required" }, 401);
-        }
-        if (!verifyCsrf(req, resolved.session)) {
-          return jsonResponse({ error: "Invalid CSRF token" }, 403);
+        // Live host VM CPU & memory usage telemetry
+        if (pathname === "/api/metrics" && req.method === "GET") {
+          return jsonResponse({ metrics: hostMetrics.getSnapshot() });
         }
 
-        const extraHeaders = resolved.setCookie
-          ? { "Set-Cookie": resolved.setCookie }
-          : undefined;
+        // Identity lookup (read-only: inspects ?user=..., GCP IAP header, or session cookie)
+        if (pathname === "/api/me" && req.method === "GET") {
+          const metrics = hostMetrics.getSnapshot();
+          const resolved = resolveRequestIdentity(req, config);
+          if (!resolved) {
+            return jsonResponse({ authenticated: false, metrics });
+          }
+          if ("error" in resolved) {
+            return jsonResponse({ authenticated: false, error: resolved.error, metrics }, 400);
+          }
 
-        const metrics = hostMetrics.getSnapshot();
-        if (metrics.overloaded) {
-          console.warn(
-            `${new Date().toISOString()} [capacity] Refused session for '${resolved.session.username}': 5m avg CPU is ${metrics.cpuAvg5mPercent}% (>= ${metrics.maxCpuAvg5mPercent}%)`
-          );
+          const extraHeaders = resolved.setCookie ? { "Set-Cookie": resolved.setCookie } : undefined;
           return jsonResponse(
             {
-              error: RESOURCE_BUSY_MESSAGE,
-              code: "RESOURCE_BUSY",
-              metrics,
-            },
-            503,
-            extraHeaders
-          );
-        }
-
-        try {
-          const provisioned = await vmUsers.ensureProvisionedUser(
-            resolved.session.username,
-            resolved.session.email
-          );
-          return jsonResponse(
-            {
-              ok: true,
-              created: provisioned.created,
+              authenticated: true,
+              authSource: resolved.source,
+              csrfToken: resolved.session.csrfToken,
               user: {
-                email: provisioned.email,
-                username: provisioned.username,
-                homeDir: provisioned.homeDir,
+                email: resolved.session.email,
+                username: resolved.session.username,
               },
-              rdpPassword: provisioned.password,
+              demos: DEMO_CATALOG,
               metrics,
             },
             200,
             extraHeaders
           );
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : "Failed to provision Linux user";
-          console.error(
-            `${new Date().toISOString()} [vm-users] Failed provisioning '${resolved.session.username}': ${msg}`
-          );
-          return jsonResponse({ error: msg }, 500);
         }
-      }
 
-      // Clear local cookie session (e.g. switching ?user=...) and sign out desktop session
-      if (pathname === "/api/auth/logout" && req.method === "POST") {
-        const resolved = resolveRequestIdentity(req, config);
-        if (resolved && !("error" in resolved)) {
+        // Automatic Linux user creation + users.yaml password generation/retrieval
+        if (pathname === "/api/vm-user/ensure" && req.method === "POST") {
+          const resolved = resolveRequestIdentity(req, config);
+          if (!resolved || "error" in resolved) {
+            return jsonResponse({ error: "Authentication required" }, 401);
+          }
           if (!verifyCsrf(req, resolved.session)) {
             return jsonResponse({ error: "Invalid CSRF token" }, 403);
           }
-          const logoutUser = resolved.session.username;
-          void vmUsers.withUserSessionLock(logoutUser, async () => {
-            await vmUsers.terminateDesktopSession(logoutUser, "disconnect");
-          });
-        }
-        const headers = new Headers();
-        for (const cookie of clearSessionCookieHeaders(req, config)) {
-          headers.append("Set-Cookie", cookie);
-        }
-        headers.set("Clear-Site-Data", '"cookies", "storage"');
-        return jsonResponse({ ok: true }, 200, headers);
-      }
 
-      if (pathname.startsWith("/api/")) {
-        return jsonResponse({ error: "Not found" }, 404);
-      }
+          const extraHeaders = resolved.setCookie
+            ? { "Set-Cookie": resolved.setCookie }
+            : undefined;
 
-      // Serve index.html for "/" and "/desktop" (also establishing cookie when ?user=... or IAP header is present)
-      if (req.method === "GET" || req.method === "HEAD") {
-        if (pathname === "/" || pathname === "/desktop") {
-          const nonce = crypto.randomBytes(16).toString("base64");
-          const diskIndex = Bun.file(path.join(config.publicDir, "index.html"));
-          const indexFile =
-            !config.isCompiledBinary && (await diskIndex.exists())
-              ? diskIndex
-              : Bun.file(EMBEDDED_PUBLIC_FILES["/index.html"]!.filePath);
-          const htmlTemplate = await indexFile.text();
-          const html = htmlTemplate.replaceAll("{{CSP_NONCE}}", nonce);
-          const headers = new Headers({
-            "Content-Type": "text/html; charset=utf-8",
-            "Cache-Control": "no-store",
-          });
-          const resolved = resolveRequestIdentity(req, config);
-          if (resolved && !("error" in resolved) && resolved.setCookie) {
-            headers.append("Set-Cookie", resolved.setCookie);
+          const metrics = hostMetrics.getSnapshot();
+          if (metrics.overloaded) {
+            console.warn(
+              `${new Date().toISOString()} [capacity] Refused session for '${resolved.session.username}': 5m avg CPU is ${metrics.cpuAvg5mPercent}% (>= ${metrics.maxCpuAvg5mPercent}%)`
+            );
+            return jsonResponse(
+              {
+                error: RESOURCE_BUSY_MESSAGE,
+                code: "RESOURCE_BUSY",
+                metrics,
+              },
+              503,
+              extraHeaders
+            );
           }
-          applySecurityHeaders(headers, nonce);
-          return new Response(req.method === "HEAD" ? null : html, { status: 200, headers });
+
+          try {
+            const provisioned = await vmUsers.ensureProvisionedUser(
+              resolved.session.username,
+              resolved.session.email
+            );
+            return jsonResponse(
+              {
+                ok: true,
+                created: provisioned.created,
+                user: {
+                  email: provisioned.email,
+                  username: provisioned.username,
+                  homeDir: provisioned.homeDir,
+                },
+                rdpPassword: provisioned.password,
+                metrics,
+              },
+              200,
+              extraHeaders
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Failed to provision Linux user";
+            console.error(
+              `${new Date().toISOString()} [vm-users] Failed provisioning '${resolved.session.username}': ${msg}`
+            );
+            return jsonResponse({ error: msg }, 500);
+          }
         }
 
-        // Safe static asset resolution: compiled binary always prefers embedded assets so stale disk files never shadow updates
-        const safeRel = path.posix.normalize(pathname).replace(/^\/+/, "");
-        if (!config.isCompiledBinary) {
-          const resolved = path.resolve(config.publicDir, safeRel);
-          if (resolved.startsWith(config.publicDir + path.sep) && !safeRel.includes("..")) {
-            const file = Bun.file(resolved);
-            if (await file.exists()) {
-              const ext = path.extname(resolved).toLowerCase();
-              const headers = new Headers({
-                "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
-                "Cache-Control": "no-store",
-              });
-              applySecurityHeaders(headers);
-              return new Response(req.method === "HEAD" ? null : file, { status: 200, headers });
+        // Clear local cookie session (e.g. switching ?user=...) and sign out desktop session
+        if (pathname === "/api/auth/logout" && req.method === "POST") {
+          const resolved = resolveRequestIdentity(req, config);
+          if (resolved && !("error" in resolved)) {
+            if (!verifyCsrf(req, resolved.session)) {
+              return jsonResponse({ error: "Invalid CSRF token" }, 403);
+            }
+            const logoutUser = resolved.session.username;
+            void vmUsers.withUserSessionLock(logoutUser, async () => {
+              await vmUsers.terminateDesktopSession(logoutUser, "disconnect");
+            });
+          }
+          const headers = new Headers();
+          for (const cookie of clearSessionCookieHeaders(req, config)) {
+            headers.append("Set-Cookie", cookie);
+          }
+          headers.set("Clear-Site-Data", '"cookies", "storage"');
+          return jsonResponse({ ok: true }, 200, headers);
+        }
+
+        if (pathname.startsWith("/api/")) {
+          return jsonResponse({ error: "Not found" }, 404);
+        }
+
+        // Serve index.html for "/" and "/desktop" (also establishing cookie when ?user=... or IAP header is present)
+        if (req.method === "GET" || req.method === "HEAD") {
+          if (pathname === "/" || pathname === "/desktop") {
+            const nonce = crypto.randomBytes(16).toString("base64");
+            const diskIndex = Bun.file(path.join(config.publicDir, "index.html"));
+            const indexFile =
+              !config.isCompiledBinary && (await diskIndex.exists())
+                ? diskIndex
+                : Bun.file(EMBEDDED_PUBLIC_FILES["/index.html"]!.filePath);
+            const htmlTemplate = await indexFile.text();
+            const html = htmlTemplate.replaceAll("{{CSP_NONCE}}", nonce);
+            const headers = new Headers({
+              "Content-Type": "text/html; charset=utf-8",
+              "Cache-Control": "no-store",
+            });
+            const resolved = resolveRequestIdentity(req, config);
+            if (resolved && !("error" in resolved) && resolved.setCookie) {
+              headers.append("Set-Cookie", resolved.setCookie);
+            }
+            applySecurityHeaders(headers, nonce);
+            return new Response(req.method === "HEAD" ? null : html, { status: 200, headers });
+          }
+
+          // Safe static asset resolution: compiled binary always prefers embedded assets so stale disk files never shadow updates
+          const safeRel = path.posix.normalize(pathname).replace(/^\/+/, "");
+          if (!config.isCompiledBinary) {
+            const resolved = path.resolve(config.publicDir, safeRel);
+            if (resolved.startsWith(config.publicDir + path.sep) && !safeRel.includes("..")) {
+              const file = Bun.file(resolved);
+              if (await file.exists()) {
+                const ext = path.extname(resolved).toLowerCase();
+                const headers = new Headers({
+                  "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
+                  "Cache-Control": "no-store",
+                });
+                applySecurityHeaders(headers);
+                return new Response(req.method === "HEAD" ? null : file, { status: 200, headers });
+              }
             }
           }
+
+          const embedded = EMBEDDED_PUBLIC_FILES[`/${safeRel}`];
+          if (embedded) {
+            const file = Bun.file(embedded.filePath);
+            const headers = new Headers({
+              "Content-Type": embedded.contentType,
+              "Cache-Control": "no-store",
+            });
+            applySecurityHeaders(headers);
+            return new Response(req.method === "HEAD" ? null : file, { status: 200, headers });
+          }
         }
 
-        const embedded = EMBEDDED_PUBLIC_FILES[`/${safeRel}`];
-        if (embedded) {
-          const file = Bun.file(embedded.filePath);
-          const headers = new Headers({
-            "Content-Type": embedded.contentType,
-            "Cache-Control": "no-store",
-          });
-          applySecurityHeaders(headers);
-          return new Response(req.method === "HEAD" ? null : file, { status: 200, headers });
-        }
+        return jsonResponse({ error: "Not found" }, 404);
+      };
+
+      const res = await handleHttpRequest();
+      if (res && !isRdpWs) {
+        const durationMs = (performance.now() - startedAt).toFixed(1);
+        const remoteIp =
+          req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+          srv.requestIP(req)?.address ||
+          "-";
+        const host = req.headers.get("host") || "-";
+        const ua = req.headers.get("user-agent") || "-";
+        console.log(
+          `${new Date().toISOString()} [http] ${req.method} ${pathname}${url.search} -> ${res.status} (${durationMs}ms) ip=${remoteIp} host=${host} ua="${ua}"`
+        );
       }
-
-      return jsonResponse({ error: "Not found" }, 404);
+      return res;
     },
 
     websocket: {
@@ -392,6 +426,9 @@ if (import.meta.main) {
       !isRoot ? " | privilege=sudo -n (run with sudo if passwordless sudo is not configured)" : " | privilege=root"
     }`
   );
-  // Provision/update shared VM desktop apps once at server startup for all users
-  void vmUsers.ensureSystemTools();
+  // Provision/update shared VM desktop & CLI apps (Antigravity, Claude Code, Claude Cowork, etc.) once at server startup for all users
+  void vmUsers.ensureSystemTools().catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`${new Date().toISOString()} [bootstrap] System tool bootstrap failed: ${msg}`);
+  });
 }

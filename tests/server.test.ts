@@ -192,6 +192,26 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     const html = await res.text();
     expect(html).toContain("<title>Apigee AI Demos</title>");
     expect(html).not.toContain("{{CSP_NONCE}}");
+
+    const headRoot = await fetch(`${baseUrl}/`, { method: "HEAD" });
+    expect(headRoot.status).toBe(200);
+
+    for (const hcPath of [
+      "/api/health",
+      "/health",
+      "/healthz",
+      "/livez",
+      "/readyz",
+      "/ping",
+      "/status",
+    ]) {
+      const getHc = await fetch(`${baseUrl}${hcPath}`);
+      expect(getHc.status).toBe(200);
+      expect(await getHc.json()).toEqual({ ok: true });
+
+      const headHc = await fetch(`${baseUrl}${hcPath}`, { method: "HEAD" });
+      expect(headHc.status).toBe(200);
+    }
   });
 
   test("parseUserIdentity parses GCP IAP headers, arbitrary emails (?user=test@example.com), and rejects reserved accounts", () => {
@@ -550,6 +570,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       "google-chrome.desktop",
       "codium.desktop",
       "antigravity.desktop",
+      "com.anthropic.Claude.desktop",
     ]) {
       await fs.writeFile(
         path.join(mockAppsDir, appFile),
@@ -573,11 +594,19 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     const mgr = new VmUserManager(cfg);
 
     const freshHome = path.join(tmpDir, "home-alice");
+    const fakeSysClaude = path.join(tmpDir, "fake-sys-claude");
+    await fs.writeFile(fakeSysClaude, "#!/bin/sh\necho '2.1.323 (Claude Code)'\n", { mode: 0o755 });
+    await fs.mkdir(path.join(freshHome, ".local", "bin"), { recursive: true });
+    await fs.writeFile(path.join(freshHome, ".local", "bin", "claude"), "#!/bin/sh\necho old\n", {
+      mode: 0o755,
+    });
+
     const progressMessages: string[] = [];
     const envOverrides = {
       ON_CONNECT_APPS_DIR: mockAppsDir,
       ON_CONNECT_SKIP_INSTALL: "1",
       ON_CONNECT_SKIP_PROCESS_CHECK: "1",
+      ON_CONNECT_CLAUDE_BIN: fakeSysClaude,
     };
 
     const plankDir = path.join(freshHome, ".config", "plank", "dock1", "launchers");
@@ -600,6 +629,11 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     });
 
     expect(progressMessages.length).toBeGreaterThan(0);
+
+    // Verify stale ~/.local/bin/claude binary was replaced with a symlink to system claude
+    const localClaudeStat = await fs.lstat(path.join(freshHome, ".local", "bin", "claude"));
+    expect(localClaudeStat.isSymbolicLink()).toBe(true);
+    expect(await fs.readlink(path.join(freshHome, ".local", "bin", "claude"))).toBe(fakeSysClaude);
 
     const panelConfPath = path.join(freshHome, ".config", "lxqt", "panel.conf");
     const pcmanfmConfPath = path.join(freshHome, ".config", "pcmanfm-qt", "lxqt", "settings.conf");
@@ -626,24 +660,49 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     expect(pcmanfmConf).toContain("QuickExec=true");
     expect(pcmanfmConf).toContain("WallpaperMode=zoom");
 
-    const expectedDesktopTitles: Record<string, string> = {
-      "qterminal.desktop": "Title qterminal.desktop",
-      "google-chrome.desktop": "Title google-chrome.desktop",
-      "codium.desktop": "VSCodium",
-      "antigravity.desktop": "Antigravity",
-    };
+    const expectedDesktopShortcuts: Array<{
+      shortcutFile: string;
+      sourceAppFile: string;
+      expectedTitle: string;
+    }> = [
+      {
+        shortcutFile: "qterminal.desktop",
+        sourceAppFile: "qterminal.desktop",
+        expectedTitle: "Title qterminal.desktop",
+      },
+      {
+        shortcutFile: "google-chrome.desktop",
+        sourceAppFile: "google-chrome.desktop",
+        expectedTitle: "Title google-chrome.desktop",
+      },
+      {
+        shortcutFile: "codium.desktop",
+        sourceAppFile: "codium.desktop",
+        expectedTitle: "VSCodium",
+      },
+      {
+        shortcutFile: "antigravity.desktop",
+        sourceAppFile: "antigravity.desktop",
+        expectedTitle: "Antigravity",
+      },
+      {
+        shortcutFile: "claude.desktop",
+        sourceAppFile: "com.anthropic.Claude.desktop",
+        expectedTitle: "Claude",
+      },
+    ];
 
-    for (const [desktopShortcut, expectedTitle] of Object.entries(expectedDesktopTitles)) {
+    for (const { shortcutFile, sourceAppFile, expectedTitle } of expectedDesktopShortcuts) {
       const shortcutText = await fs.readFile(
-        path.join(freshHome, "Desktop", desktopShortcut),
+        path.join(freshHome, "Desktop", shortcutFile),
         "utf8"
       );
       expect(shortcutText).toContain("Type=Link");
       expect(shortcutText).toContain(`Name=${expectedTitle}`);
       expect(shortcutText).not.toContain("URL Handler");
       expect(shortcutText).not.toContain("Action Title");
-      expect(shortcutText).toContain(`Icon=icon-${desktopShortcut}`);
-      expect(shortcutText).toContain(`URL=${path.join(mockAppsDir, desktopShortcut)}`);
+      expect(shortcutText).toContain(`Icon=icon-${sourceAppFile}`);
+      expect(shortcutText).toContain(`URL=${path.join(mockAppsDir, sourceAppFile)}`);
     }
     expect(
       await Bun.file(path.join(freshHome, "Desktop", "codium-url-handler.desktop")).exists()
@@ -656,6 +715,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       ["04-terminal.dockitem", "qterminal.desktop"],
       ["05-text-editor.dockitem", "featherpad.desktop"],
       ["06-antigravity.dockitem", "antigravity.desktop"],
+      ["07-claude.dockitem", "com.anthropic.Claude.desktop"],
     ] as const;
 
     for (const [dockFile, desktopFile] of expectedDockItems) {
@@ -710,6 +770,175 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     );
     expect(bobCodiumDesktop).toContain("Name=VSCodium\n");
     expect(bobCodiumDesktop).toContain(`URL=${path.join(emptyAppsDir, "zzz-custom-codium.desktop")}`);
+    const bobClaudeDesktop = await fs.readFile(
+      path.join(fallbackHome, "Desktop", "claude.desktop"),
+      "utf8"
+    );
+    expect(bobClaudeDesktop).toContain("Name=Claude\n");
+  });
+
+  test("bootstraps and atomically updates Claude Code system-wide with SHA-256 verification and managed settings", async () => {
+    const claudeTestDir = path.join(tmpDir, "claude-bootstrap");
+    const claudeBin = path.join(claudeTestDir, "bin", "claude");
+    const claudeShareDir = path.join(claudeTestDir, "share");
+    const claudeEtcDir = path.join(claudeTestDir, "etc");
+    await fs.mkdir(claudeTestDir, { recursive: true });
+
+    let activeVersion = "2.1.320";
+    let binaryDownloads = 0;
+
+    const buildReleasePayloads = async (version: string) => {
+      const rawBytes = Buffer.from(
+        `#!/usr/bin/env bash\necho "${version} (Claude Code)"\n`,
+        "utf8"
+      );
+      const rawSha = crypto.createHash("sha256").update(rawBytes).digest("hex");
+
+      const rawTmp = path.join(claudeTestDir, `payload-${version}`);
+      const zstTmp = `${rawTmp}.zst`;
+      await fs.writeFile(rawTmp, rawBytes);
+      const zstProc = Bun.spawn(["zstd", "-q", "-f", rawTmp, "-o", zstTmp]);
+      const zstOk = (await zstProc.exited) === 0;
+      const zstBytes = zstOk ? await fs.readFile(zstTmp) : null;
+      const zstSha = zstBytes
+        ? crypto.createHash("sha256").update(zstBytes).digest("hex")
+        : null;
+
+      return { rawBytes, rawSha, zstBytes, zstSha };
+    };
+
+    const releases: Record<string, Awaited<ReturnType<typeof buildReleasePayloads>>> = {
+      "2.1.320": await buildReleasePayloads("2.1.320"),
+      "2.1.323": await buildReleasePayloads("2.1.323"),
+    };
+
+    const releaseServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        const p = new URL(req.url).pathname;
+        if (p === "/latest") {
+          return new Response(activeVersion);
+        }
+        const m = p.match(/^\/([^/]+)\/(.+)$/);
+        if (!m) return new Response("Not found", { status: 404 });
+        const rel = releases[m[1]!];
+        if (!rel) return new Response("Unknown version", { status: 404 });
+        const sub = m[2]!;
+
+        if (sub === "manifest.json") {
+          return Response.json({
+            version: m[1],
+            platforms: {
+              "darwin-arm64": {
+                binary: "claude",
+                checksum: "0".repeat(64),
+                size: 123,
+              },
+              "linux-x64": {
+                binary: "claude",
+                checksum: rel.rawSha,
+                size: rel.rawBytes.length,
+              },
+              "linux-arm64": {
+                binary: "claude",
+                checksum: rel.rawSha,
+                size: rel.rawBytes.length,
+              },
+            },
+          });
+        }
+        if (sub === "manifest.zst.json" && rel.zstBytes && rel.zstSha) {
+          return Response.json({
+            version: m[1],
+            platforms: {
+              "darwin-arm64": {
+                binary: "claude.zst",
+                checksum: "1".repeat(64),
+                size: 100,
+                bundle: { checksum: "2".repeat(64), size: 101 },
+              },
+              "linux-x64": {
+                binary: "claude.zst",
+                checksum: rel.zstSha,
+                size: rel.zstBytes.length,
+              },
+              "linux-arm64": {
+                binary: "claude.zst",
+                checksum: rel.zstSha,
+                size: rel.zstBytes.length,
+              },
+            },
+          });
+        }
+        if (sub.endsWith("/claude.zst") && rel.zstBytes) {
+          binaryDownloads++;
+          return new Response(rel.zstBytes);
+        }
+        if (sub.endsWith("/claude")) {
+          binaryDownloads++;
+          return new Response(rel.rawBytes);
+        }
+        return new Response("Not found", { status: 404 });
+      },
+    });
+
+    try {
+      const runClaudeBootstrap = async () => {
+        const proc = Bun.spawn(
+          ["/bin/bash", path.resolve("scripts/on-connect.sh"), "--install-claude-code-only"],
+          {
+            env: {
+              ...process.env,
+              ON_CONNECT_CLAUDE_BIN: claudeBin,
+              ON_CONNECT_CLAUDE_SHARE_DIR: claudeShareDir,
+              ON_CONNECT_CLAUDE_ETC_DIR: claudeEtcDir,
+              ON_CONNECT_CLAUDE_RELEASES_URL: `http://127.0.0.1:${releaseServer.port}`,
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          }
+        );
+        const [code, stdout, stderr] = await Promise.all([
+          proc.exited,
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        expect(code).toBe(0);
+        return { stdout, stderr };
+      };
+
+      // 1. Fresh install downloads & verifies 2.1.320 and writes managed-settings.json
+      const firstRun = await runClaudeBootstrap();
+      expect(firstRun.stdout).toContain("Installing Claude Code v2.1.320");
+      expect(binaryDownloads).toBe(1);
+
+      const verProc1 = Bun.spawn([claudeBin, "--version"], { stdout: "pipe" });
+      expect((await new Response(verProc1.stdout).text()).trim()).toBe("2.1.320 (Claude Code)");
+      expect((await fs.readFile(path.join(claudeShareDir, "cli-version"), "utf8")).trim()).toBe(
+        "2.1.320"
+      );
+
+      const managedSettings = JSON.parse(
+        await fs.readFile(path.join(claudeEtcDir, "managed-settings.json"), "utf8")
+      );
+      expect(managedSettings.env.DISABLE_AUTOUPDATER).toBe("1");
+
+      // 2. Re-running with same version is an instant no-op (no binary download)
+      await runClaudeBootstrap();
+      expect(binaryDownloads).toBe(1);
+
+      // 3. Publishing 2.1.323 upgrades binary atomically on next bootstrap
+      activeVersion = "2.1.323";
+      const upgradeRun = await runClaudeBootstrap();
+      expect(upgradeRun.stdout).toContain("Installing Claude Code v2.1.323");
+      expect(binaryDownloads).toBe(2);
+
+      const verProc2 = Bun.spawn([claudeBin, "--version"], { stdout: "pipe" });
+      expect((await new Response(verProc2.stdout).text()).trim()).toBe("2.1.323 (Claude Code)");
+    } finally {
+      releaseServer.stop(true);
+    }
   });
 
   test("serves continuous host VM CPU/memory telemetry and refuses connections when 5m average CPU >= 70%", async () => {
