@@ -658,6 +658,9 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     expect(firstPass).toContain("# [panel2]");
 
     const tint2Conf = await fs.readFile(path.join(freshHome, ".config", "tint2", "tint2rc"), "utf8");
+    expect(tint2Conf).toContain("panel_items = LT");
+    expect(tint2Conf).toContain("task_text = 0");
+    expect(tint2Conf).toContain("task_icon = 1");
     expect(tint2Conf).toContain("panel_position = bottom center horizontal");
     expect(tint2Conf).toContain("background_color = #000000 0");
     expect(tint2Conf).toContain("launcher_icon_size = 48");

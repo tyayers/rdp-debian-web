@@ -1224,8 +1224,19 @@ border_color_hover = #000000 0
 background_color_pressed = #000000 0
 border_color_pressed = #000000 0
 
-# Panel geometry: auto-width centered at bottom
-panel_items = L
+# Background 2: subtle translucent pill for active/hovered running task icons
+rounded = 10
+border_width = 0
+border_sides = TBLR
+background_color = #ffffff 18
+border_color = #ffffff 0
+background_color_hover = #ffffff 28
+border_color_hover = #ffffff 0
+background_color_pressed = #ffffff 35
+border_color_pressed = #ffffff 0
+
+# Panel geometry: auto-width centered at bottom (Launchers + icon-only running Taskbar)
+panel_items = LT
 panel_size = 0 60
 panel_margin = 0 8
 panel_padding = 8 4 8
@@ -1242,7 +1253,39 @@ panel_window_name = tint2
 disable_transparency = 0
 mouse_effects = 1
 
-# Launcher icons: 64px, tight spacing
+# Taskbar / running apps (icon-only next to launchers)
+taskbar_mode = single_desktop
+taskbar_hide_if_empty = 1
+taskbar_padding = 4 0 4
+taskbar_background_id = 0
+taskbar_active_background_id = 0
+taskbar_name = 0
+taskbar_hide_inactive_tasks = 0
+taskbar_hide_different_monitor = 0
+taskbar_hide_different_desktop = 0
+taskbar_always_show_all_desktop_tasks = 0
+taskbar_sort_order = none
+task_align = left
+
+task_text = 0
+task_icon = 1
+task_centered = 1
+task_tooltip = 1
+task_maximum_size = 56 56
+task_padding = 4 4 4
+task_background_id = 0
+task_active_background_id = 2
+task_iconified_background_id = 0
+task_urgent_background_id = 2
+task_icon_asb = 100 0 0
+task_active_icon_asb = 100 0 0
+task_urgent_icon_asb = 100 0 0
+task_iconified_icon_asb = 70 0 0
+mouse_left = toggle_iconify
+mouse_middle = close
+mouse_right = none
+
+# Launcher icons: 48px, tight spacing
 launcher_padding = 6 4 6
 launcher_background_id = 0
 launcher_icon_background_id = 0
