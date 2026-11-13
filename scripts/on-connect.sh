@@ -654,11 +654,21 @@ apply_trust() {
 }
 
 ensure_panel_running() {
+  local picom_started=0
   if command -v picom >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x picom >/dev/null 2>&1; then
-    nohup picom --backend xrender --no-fading-openclose </dev/null >/dev/null 2>&1 &
+    nohup picom --backend xrender --no-fading-openclose --no-vsync </dev/null >/dev/null 2>&1 &
+    picom_started=1
+    sleep 0.4
   fi
-  if command -v lxqt-panel >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
-    nohup lxqt-panel </dev/null >/dev/null 2>&1 &
+  if command -v lxqt-panel >/dev/null 2>&1; then
+    if [[ "$picom_started" -eq 1 ]] && pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
+      # Restart lxqt-panel once picom is active so it detects the X11 compositor for true transparency
+      pkill -TERM -u "$(id -u)" -x lxqt-panel 2>/dev/null || true
+      sleep 0.3
+    fi
+    if ! pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
+      nohup lxqt-panel </dev/null >/dev/null 2>&1 &
+    fi
   fi
 }
 
@@ -1106,13 +1116,15 @@ apps\\size=1
 [panel2]
 alignment=center
 position=Bottom
-height=96
-iconSize=80
+height=84
+iconSize=72
+lineCount=1
 width=100
 width-percent=true
 reserve-space=true
 hidable=false
 opacity=0
+background-color=@Variant(\0\0\0\x43\x1\xff\xff\0\0\0\0\0\0\0\0)
 plugins=dock_spacer_left, dock_launchers, dock_spacer_right
 
 [dock_spacer_left]
@@ -1298,7 +1310,7 @@ write_user_file "$PICOM_AUTOSTART" 0644 <<'EOF' || true
 Type=Application
 Name=Picom Compositor
 Comment=Lightweight X11 compositor for panel transparency
-Exec=picom --backend xrender --no-fading-openclose
+Exec=picom --backend xrender --no-fading-openclose --no-vsync
 Terminal=false
 Hidden=false
 NoDisplay=true
