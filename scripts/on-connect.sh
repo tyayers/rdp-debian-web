@@ -1298,7 +1298,7 @@ update_pcmanfm_profile() {
       BEGIN {
         sec = ""
         saw_behavior = 0; set_quickexec = 0
-        saw_desktop = 0; set_wp = 0; set_wpmode = 0; set_comp = 0; set_net = 0
+        saw_desktop = 0; set_wp = 0; set_wpmode = 0; set_shortcuts = 0
       }
       function flush_sec() {
         if (sec == "Behavior" && !set_quickexec) {
@@ -1307,8 +1307,7 @@ update_pcmanfm_profile() {
         } else if (sec == "Desktop") {
           if (!set_wp) { print "Wallpaper=" ENVIRON["TARGET_WALLPAPER"]; set_wp = 1 }
           if (!set_wpmode) { print "WallpaperMode=zoom"; set_wpmode = 1 }
-          if (!set_comp) { print "ShowComputer=false"; set_comp = 1 }
-          if (!set_net) { print "ShowNetwork=false"; set_net = 1 }
+          if (!set_shortcuts) { print "DesktopShortcuts=Home, Trash"; set_shortcuts = 1 }
         }
       }
       /^\[[^]]+\][ \t]*$/ {
@@ -1338,14 +1337,12 @@ update_pcmanfm_profile() {
             set_wpmode = 1
             next
           }
-          if ($0 ~ /^ShowComputer=/) {
-            print "ShowComputer=false"
-            set_comp = 1
+          if ($0 ~ /^DesktopShortcuts=/) {
+            print "DesktopShortcuts=Home, Trash"
+            set_shortcuts = 1
             next
           }
-          if ($0 ~ /^ShowNetwork=/) {
-            print "ShowNetwork=false"
-            set_net = 1
+          if ($0 ~ /^(ShowComputer|ShowNetwork)=/) {
             next
           }
         }
@@ -1363,8 +1360,7 @@ update_pcmanfm_profile() {
           print "[Desktop]"
           print "Wallpaper=" ENVIRON["TARGET_WALLPAPER"]
           print "WallpaperMode=zoom"
-          print "ShowComputer=false"
-          print "ShowNetwork=false"
+          print "DesktopShortcuts=Home, Trash"
         }
       }
     ' "$seed" >"$tmp_out"
@@ -1376,8 +1372,7 @@ QuickExec=true
 [Desktop]
 Wallpaper=$USER_WALLPAPER
 WallpaperMode=zoom
-ShowComputer=false
-ShowNetwork=false
+DesktopShortcuts=Home, Trash
 EOF
   fi
   [[ -n "$tmp_seed" ]] && rm -f -- "$tmp_seed"
@@ -1386,10 +1381,85 @@ EOF
     PCMANFM_NEEDS_RELOAD=1
   fi
   rm -f -- "$tmp_out"
+
+  # Enforce top-to-bottom desktop icon order: Chrome, Antigravity, Claude, Home, Terminal, VSCodium, Trash
+  write_user_file "$conf_dir/desktop-items-0.conf" 0644 <<'EOF' || true
+[google-chrome.desktop]
+pos=@Point(16 16)
+
+[antigravity.desktop]
+pos=@Point(16 116)
+
+[claude.desktop]
+pos=@Point(16 216)
+
+[Home]
+pos=@Point(16 316)
+
+[qterminal.desktop]
+pos=@Point(16 416)
+
+[codium.desktop]
+pos=@Point(16 516)
+
+[Trash]
+pos=@Point(16 616)
+EOF
 }
 
 update_pcmanfm_profile "lxqt"
 update_pcmanfm_profile "default"
+
+# 3b. Set default QTerminal window size (~93x23 chars -> 840x470 px) in ~/.config/qterminal.org/qterminal.ini
+QTERMINAL_INI="$HOMEDIR/.config/qterminal.org/qterminal.ini"
+ensure_user_dir "$HOMEDIR/.config/qterminal.org"
+if [[ ! -f "$QTERMINAL_INI" ]]; then
+  write_user_file "$QTERMINAL_INI" 0644 <<'EOF' || true
+[General]
+SaveSizeOnExit=true
+
+[MainWindow]
+size=@Size(840 470)
+EOF
+else
+  QTERM_TMP="$(mktemp "${TMPDIR:-/tmp}/qterminal-ini.XXXXXX")"
+  awk '
+    BEGIN { sec = ""; saw_main = 0; set_size = 0 }
+    function flush_sec() {
+      if (sec == "MainWindow" && !set_size) {
+        print "size=@Size(840 470)"
+        set_size = 1
+      }
+    }
+    /^\[[^]]+\][ \t]*$/ {
+      flush_sec()
+      sec = $0
+      sub(/^\[/, "", sec)
+      sub(/\][ \t]*$/, "", sec)
+      if (sec == "MainWindow") saw_main = 1
+      print $0
+      next
+    }
+    {
+      if (sec == "MainWindow" && $0 ~ /^size=/) {
+        print "size=@Size(840 470)"
+        set_size = 1
+        next
+      }
+      print $0
+    }
+    END {
+      flush_sec()
+      if (!saw_main) {
+        print ""
+        print "[MainWindow]"
+        print "size=@Size(840 470)"
+      }
+    }
+  ' "$QTERMINAL_INI" >"$QTERM_TMP"
+  write_user_file "$QTERMINAL_INI" 0644 <"$QTERM_TMP" || true
+  rm -f -- "$QTERM_TMP"
+fi
 
 # 4. Configure XDG portal backend, GTK3 icon theme fallback & Plank/Session-Init XDG autostart (~/.config/autostart/)
 if [[ -f /usr/share/icons/Adwaita/index.theme && ! -f "$HOMEDIR/.config/gtk-3.0/settings.ini" ]]; then

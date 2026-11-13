@@ -670,8 +670,18 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     expect(wallpaperStat.size).toBe(sourceWallpaperStat.size);
     expect(pcmanfmConf).toContain("QuickExec=true");
     expect(pcmanfmConf).toContain("WallpaperMode=zoom");
-    expect(pcmanfmConf).toContain("ShowComputer=false");
-    expect(pcmanfmConf).toContain("ShowNetwork=false");
+    expect(pcmanfmConf).toContain("DesktopShortcuts=Home, Trash");
+    const desktopItemsConf = await fs.readFile(
+      path.join(freshHome, ".config", "pcmanfm-qt", "lxqt", "desktop-items-0.conf"),
+      "utf8"
+    );
+    expect(desktopItemsConf).toContain("[google-chrome.desktop]\npos=@Point(16 16)");
+    expect(desktopItemsConf).toContain("[Trash]\npos=@Point(16 616)");
+    const qtermIni = await fs.readFile(
+      path.join(freshHome, ".config", "qterminal.org", "qterminal.ini"),
+      "utf8"
+    );
+    expect(qtermIni).toContain("size=@Size(840 470)");
 
     const expectedDesktopShortcuts: Array<{
       shortcutFile: string;

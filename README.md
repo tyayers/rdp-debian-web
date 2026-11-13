@@ -85,5 +85,5 @@ sudo ./scripts/systemd-service.sh deregister
   - Whenever the user disconnects (closes the browser tab, reloads, clicks **Disconnect**, or signs out), the server immediately runs `scripts/on-connect.sh --signout <username>` to sign out their desktop session.
 - **Applied per user on connect (`./scripts/on-connect.sh <username> <homedir>`)**:
   1. Enforces the top **LXQt** panel (`panel1` in `~/.config/lxqt/panel.conf`, including explicit `menu_file=/etc/xdg/menus/lxqt-applications.menu` and a right-aligned **Sign Out** button) and a centered bottom **LXQt** dock (`panel2` with left/right expandable spacers), guarantees `lxqt-panel` is running, and marks `~/Desktop/*.desktop` shortcuts trusted.
-  2. Copies `public/wallpaper.jpg` into `~/.local/share/backgrounds/wallpaper.jpg` with `WallpaperMode=zoom` and hides `Computer` / `Network` desktop icons (`ShowComputer=false`, `ShowNetwork=false`).
+  2. Copies `public/wallpaper.jpg` into `~/.local/share/backgrounds/wallpaper.jpg` with `WallpaperMode=zoom` and hides `Computer` / `Network` desktop icons (`DesktopShortcuts=Home, Trash`).
   3. Places shortcuts on `~/Desktop` (**Terminal**, **Google Chrome**, **VSCodium**, **Antigravity**, **Claude**) and pins launchers on the bottom `lxqt-panel` dock (**Google Chrome**, **Home**, **Text Editor**, **Antigravity**, **Claude**).
