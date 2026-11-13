@@ -273,7 +273,7 @@ install_or_update_system_tools() {
   # 1a. Base desktop packages: QTerminal, PCManFM-Qt, FeatherPad, LXQt panel/session/menu data, Adwaita icons, GIO/GVFS, zstd, XDG utils & GTK portal
   local missing_base=0
   local cmd
-  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel tint2 picom qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
+  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel tint2 picom setxkbmap qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
@@ -287,7 +287,7 @@ install_or_update_system_tools() {
     apt_get update -qq
     apt_get install -y -qq --no-install-recommends \
       ca-certificates curl gpg zstd xdg-utils desktop-file-utils \
-      adwaita-icon-theme librsvg2-common tint2 picom qterminal pcmanfm-qt featherpad \
+      adwaita-icon-theme librsvg2-common tint2 picom x11-xkb-utils xkb-data qterminal pcmanfm-qt featherpad \
       lxqt-menu-data lxqt-panel lxqt-session libglib2.0-bin gvfs \
       dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
@@ -1209,6 +1209,25 @@ if write_panel_conf; then
   echo "[on-connect] Applied LXQt panel.conf for '$USERNAME'"
 fi
 
+# 2a. Seed default keyboard layouts (US default + German, French, Spanish) only if user hasn't customized them
+LXQT_SESSION_CONF="$HOMEDIR/.config/lxqt/session.conf"
+if [[ ! -f "$LXQT_SESSION_CONF" ]] || ! grep -q '^layout=' "$LXQT_SESSION_CONF" 2>/dev/null; then
+  if [[ -f "$LXQT_SESSION_CONF" ]]; then
+    {
+      cat "$LXQT_SESSION_CONF"
+      printf '\n[Keyboard]\nlayout=us,de,fr,es\nmodel=pc105\noptions=grp:alt_shift_toggle\nvariant=,,,\n'
+    } | write_user_file "$LXQT_SESSION_CONF" 0644 || true
+  else
+    write_user_file "$LXQT_SESSION_CONF" 0644 <<'EOF' || true
+[Keyboard]
+layout=us,de,fr,es
+model=pc105
+options=grp:alt_shift_toggle
+variant=,,,
+EOF
+  fi
+fi
+
 # 2b. Configure tint2 bottom launcher dock (~/.config/tint2/tint2rc)
 TINT2_CONF="$HOMEDIR/.config/tint2/tint2rc"
 write_user_file "$TINT2_CONF" 0644 <<EOF || true
@@ -1271,6 +1290,8 @@ task_text = 0
 task_icon = 1
 task_centered = 1
 task_tooltip = 1
+task_thumbnail = 1
+task_thumbnail_size = 210
 task_maximum_size = 56 56
 task_padding = 4 4 4
 task_background_id = 0
@@ -1284,6 +1305,13 @@ task_iconified_icon_asb = 70 0 0
 mouse_left = toggle_iconify
 mouse_middle = close
 mouse_right = none
+
+# Tooltip (for window thumbnails and launcher names)
+tooltip_show_timeout = 0.2
+tooltip_hide_timeout = 0.1
+tooltip_padding = 6 6
+tooltip_background_id = 2
+tooltip_font_color = #f5f5f5 100
 
 # Launcher icons: 48px, tight spacing
 launcher_padding = 6 4 6
