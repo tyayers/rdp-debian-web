@@ -270,10 +270,10 @@ install_or_update_system_tools() {
       ;;
   esac
 
-  # 1a. Base desktop packages: Plank, QTerminal, PCManFM-Qt, FeatherPad, LXQt menu data, Adwaita icons, GIO/GVFS, dconf, zstd, XDG utils & GTK portal
+  # 1a. Base desktop packages: QTerminal, PCManFM-Qt, FeatherPad, LXQt panel/session/menu data, Adwaita icons, GIO/GVFS, zstd, XDG utils & GTK portal
   local missing_base=0
   local cmd
-  for cmd in curl gpg zstd xdg-open update-desktop-database plank qterminal pcmanfm-qt featherpad lxqt-leave gio dconf dbus-update-activation-environment; do
+  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
@@ -283,12 +283,12 @@ install_or_update_system_tools() {
     missing_base=1
   fi
   if [[ "$missing_base" -eq 1 ]]; then
-    echo "[status] Installing Plank, LXQt menu data, Terminal, Text Editor & desktop utilities..."
+    echo "[status] Installing LXQt desktop, Terminal, Text Editor & desktop utilities..."
     apt_get update -qq
     apt_get install -y -qq --no-install-recommends \
       ca-certificates curl gpg zstd xdg-utils desktop-file-utils \
-      adwaita-icon-theme librsvg2-common plank qterminal pcmanfm-qt featherpad \
-      lxqt-menu-data lxqt-session libglib2.0-bin gvfs dconf-cli \
+      adwaita-icon-theme librsvg2-common qterminal pcmanfm-qt featherpad \
+      lxqt-menu-data lxqt-panel lxqt-session libglib2.0-bin gvfs \
       dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
 
@@ -622,109 +622,13 @@ Categories=System;
 EOF
   chmod 0644 /usr/share/applications/apigee-signout.desktop
 
-  # 1j. System-wide dconf defaults for Plank (unlocked so Plank's GSettings sync never gets rejected)
+  # 1j. Clean up any legacy Plank startup/dconf files and install LXQt session init helper
+  rm -f /usr/local/bin/apigee-start-plank \
+    /etc/dconf/db/local.d/00-apigee-plank \
+    /etc/dconf/db/local.d/locks/00-apigee-plank
   if command -v dconf >/dev/null 2>&1; then
-    install -d -m 0755 /etc/dconf/profile /etc/dconf/db/local.d /etc/dconf/db/local.d/locks
-    cat >/etc/dconf/profile/user <<'EOF'
-user-db:user
-system-db:local
-EOF
-    chmod 0644 /etc/dconf/profile/user
-
-    cat >/etc/dconf/db/local.d/00-apigee-plank <<'EOF'
-[net/launchpad/plank/docks/dock1]
-dock-items=['01-chrome.dockitem', '02-home.dockitem', '03-text-editor.dockitem', '04-antigravity.dockitem', '05-claude.dockitem']
-show-dock-item=false
-pinned-only=false
-hide-mode='none'
-position='bottom'
-alignment='center'
-items-alignment='center'
-EOF
-    chmod 0644 /etc/dconf/db/local.d/00-apigee-plank
-
-    rm -f /etc/dconf/db/local.d/locks/00-apigee-plank
     dconf update 2>/dev/null || true
   fi
-
-  # 1k. Fast Plank & LXQt session startup helpers (prevents 2-3 minute D-Bus/portal/bamf timeouts in xrdp)
-  cat >/usr/local/bin/apigee-start-plank <<'EOF'
-#!/usr/bin/env bash
-export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-LXQt}"
-export XDG_MENU_PREFIX="${XDG_MENU_PREFIX:-lxqt-}"
-export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
-export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-dconf}"
-
-IMMEDIATE=0
-if [[ "${1:-}" == "--immediate" ]]; then
-  IMMEDIATE=1
-fi
-
-if command -v flock >/dev/null 2>&1; then
-  LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/apigee-plank-$(id -u).lock"
-  exec 8>"$LOCK_FILE"
-  flock -n 8 || exit 0
-fi
-
-PLANK_LOG="${XDG_RUNTIME_DIR:-/tmp}/apigee-plank-$(id -u).log"
-
-# 1. Propagate active X11 DISPLAY & XAUTHORITY into D-Bus and systemd --user BEFORE GTK/libbamf calls
-if [[ -n "${DISPLAY:-}" ]]; then
-  if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-    dbus-update-activation-environment --systemd DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_DATA_DIRS 2>/dev/null \
-      || dbus-update-activation-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_DATA_DIRS 2>/dev/null || true
-  fi
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user import-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_DATA_DIRS 2>/dev/null || true
-    systemctl --user reset-failed bamfdaemon.service xdg-desktop-portal.service xdg-desktop-portal-gtk.service 2>/dev/null || true
-  fi
-fi
-
-# 2. On cold session startup, wait for WM, LXQt panel & PCManFM-Qt desktop, then settle 3s so Plank
-#    initializes after X11/GTK/dconf are completely ready (same state as a post-resize restart).
-if [[ "$IMMEDIATE" -eq 0 ]] && command -v pgrep >/dev/null 2>&1; then
-  uid_num="$(id -u)"
-  for _ in $(seq 1 50); do
-    if (pgrep -u "$uid_num" -x openbox >/dev/null 2>&1 || pgrep -u "$uid_num" -x xfwm4 >/dev/null 2>&1) \
-      && pgrep -u "$uid_num" -x lxqt-panel >/dev/null 2>&1 \
-      && pgrep -u "$uid_num" -x pcmanfm-qt >/dev/null 2>&1; then
-      break
-    fi
-    sleep 0.1
-  done
-  sleep 3
-fi
-
-# 3. Pre-start bamfdaemon directly on the live X11 DISPLAY and wait until it claims D-Bus so
-#    libbamf3 never times out or misses .desktop entries while Plank initializes its dock items.
-#    Close FD 8 in child so bamfdaemon never holds the Plank flock after Plank restarts on resize!
-if ! pgrep -u "$(id -u)" -x bamfdaemon >/dev/null 2>&1; then
-  for bamf_bin in /usr/libexec/bamf/bamfdaemon /usr/lib/*/bamf/bamfdaemon; do
-    if [[ -x "$bamf_bin" ]]; then
-      nohup "$bamf_bin" </dev/null >/dev/null 2>&1 8>&- &
-      break
-    fi
-  done
-  if command -v gdbus >/dev/null 2>&1; then
-    for _ in $(seq 1 25); do
-      if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
-        --method org.freedesktop.DBus.NameHasOwner org.ayatana.bamf 2>/dev/null | grep -q 'true'; then
-        break
-      fi
-      sleep 0.1
-    done
-  else
-    sleep 0.5
-  fi
-fi
-
-# 4. Launch Plank without xdg-desktop-portal or AT-SPI D-Bus probes (eliminates 120s portal timeout)
-if command -v plank >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
-  exec env NO_AT_BRIDGE=1 GTK_USE_PORTAL=0 GDK_DEBUG=no-portals GIO_USE_PORTALS=0 plank >"$PLANK_LOG" 2>&1
-fi
-EOF
-  chmod 0755 /usr/local/bin/apigee-start-plank
 
   cat >/usr/local/bin/apigee-session-init <<'EOF'
 #!/usr/bin/env bash
@@ -749,23 +653,20 @@ apply_trust() {
   fi
 }
 
-ensure_panel_and_dock_running() {
+ensure_panel_running() {
   if command -v lxqt-panel >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
     nohup lxqt-panel </dev/null >/dev/null 2>&1 &
-  fi
-  if [[ -x /usr/local/bin/apigee-start-plank ]] && ! pgrep -u "$(id -u)" -x plank >/dev/null 2>&1; then
-    nohup /usr/local/bin/apigee-start-plank --immediate </dev/null >/dev/null 2>&1 &
   fi
 }
 
 apply_trust
 if [[ "${1:-}" == "--Immediate" ]]; then
-  ensure_panel_and_dock_running
+  ensure_panel_running
 else
   (
-    sleep 3
+    sleep 2
     apply_trust
-    ensure_panel_and_dock_running
+    ensure_panel_running
   ) </dev/null >/dev/null 2>&1 &
 fi
 EOF
@@ -1000,100 +901,9 @@ terminate_user_xrdp_session() {
 }
 
 reposition_user_plank() {
-  local target_user="$1"
-  if [[ "${ON_CONNECT_SKIP_PROCESS_CHECK:-0}" == "1" ]]; then
-    return 0
-  fi
-
-  local target_uid target_gid target_home
-  target_uid="$(id -u -- "$target_user" 2>/dev/null || true)"
-  target_gid="$(id -g -- "$target_user" 2>/dev/null || true)"
-  if [[ -z "$target_uid" || "$target_uid" -lt 1000 || -z "$target_gid" ]]; then
-    return 0
-  fi
-  if [[ "$(id -u)" -ne 0 && "$(id -un)" != "$target_user" ]]; then
-    return 0
-  fi
-  target_home="$(getent passwd -- "$target_user" | cut -d: -f6 || true)"
-  target_home="${target_home:-/home/$target_user}"
-
-  command -v pgrep >/dev/null 2>&1 || return 0
-  local sess_pid="" proc_name
-  for proc_name in lxqt-session lxqt-panel openbox pcmanfm-qt; do
-    sess_pid="$(pgrep -u "$target_uid" -x "$proc_name" 2>/dev/null | head -n1 || true)"
-    if [[ -n "$sess_pid" && -r "/proc/$sess_pid/environ" ]]; then
-      break
-    fi
-    sess_pid=""
-  done
-  [[ -z "$sess_pid" ]] && return 0
-
-  local saved_display="" saved_xauth="" saved_xdg_runtime="" saved_dbus="" k v
-  while IFS='=' read -r -d '' k v; do
-    case "$k" in
-      DISPLAY) saved_display="$v" ;;
-      XAUTHORITY) saved_xauth="$v" ;;
-      XDG_RUNTIME_DIR) saved_xdg_runtime="$v" ;;
-      DBUS_SESSION_BUS_ADDRESS) saved_dbus="$v" ;;
-    esac
-  done <"/proc/$sess_pid/environ" || true
-
-  [[ -z "$saved_display" ]] && return 0
-
-  # Allow X11 / window manager RandR geometry update to settle before restarting Plank
-  sleep 0.15
-
-  if command -v pkill >/dev/null 2>&1; then
-    pkill -TERM -u "$target_uid" -f '/usr/local/bin/apigee-start-plank' 2>/dev/null || true
-    pkill -TERM -u "$target_uid" -x plank 2>/dev/null || true
-    local attempt
-    for ((attempt = 1; attempt <= 15; attempt++)); do
-      if ! pgrep -u "$target_uid" -x plank >/dev/null 2>&1 \
-        && ! pgrep -u "$target_uid" -f '/usr/local/bin/apigee-start-plank' >/dev/null 2>&1; then
-        break
-      fi
-      sleep 0.05
-    done
-    if pgrep -u "$target_uid" -x plank >/dev/null 2>&1; then
-      pkill -KILL -u "$target_uid" -x plank 2>/dev/null || true
-      sleep 0.05
-    fi
-    if pgrep -u "$target_uid" -f '/usr/local/bin/apigee-start-plank' >/dev/null 2>&1; then
-      pkill -KILL -u "$target_uid" -f '/usr/local/bin/apigee-start-plank' 2>/dev/null || true
-      sleep 0.05
-    fi
-  fi
-
-  rm -f -- "${saved_xdg_runtime:-/tmp}/apigee-plank-${target_uid}.lock" 2>/dev/null || true
-
-  local env_args=(
-    "DISPLAY=$saved_display"
-    "HOME=$target_home"
-    "USER=$target_user"
-    "LOGNAME=$target_user"
-    "XDG_CURRENT_DESKTOP=LXQt"
-    "XDG_MENU_PREFIX=lxqt-"
-    "XDG_SESSION_TYPE=x11"
-  )
-  [[ -n "$saved_xauth" ]] && env_args+=("XAUTHORITY=$saved_xauth")
-  [[ -n "$saved_xdg_runtime" ]] && env_args+=("XDG_RUNTIME_DIR=$saved_xdg_runtime")
-  [[ -n "$saved_dbus" ]] && env_args+=("DBUS_SESSION_BUS_ADDRESS=$saved_dbus")
-
-  local start_cmd=("/usr/local/bin/apigee-start-plank" "--immediate")
-  if [[ ! -x "/usr/local/bin/apigee-start-plank" ]]; then
-    start_cmd=("env" "NO_AT_BRIDGE=1" "GTK_USE_PORTAL=0" "GDK_DEBUG=no-portals" "GIO_USE_PORTALS=0" "plank")
-  fi
-
-  if [[ "$(id -u)" -eq 0 ]] && command -v setpriv >/dev/null 2>&1; then
-    setpriv --reuid="$target_uid" --regid="$target_gid" --init-groups \
-      env "${env_args[@]}" sh -c 'nohup "$@" </dev/null >/dev/null 2>&1 &' _ "${start_cmd[@]}"
-  elif [[ "$(id -u)" -eq 0 ]] && [[ -x /usr/sbin/runuser ]]; then
-    /usr/sbin/runuser -u "$target_user" -- \
-      env "${env_args[@]}" sh -c 'nohup "$@" </dev/null >/dev/null 2>&1 &' _ "${start_cmd[@]}"
-  elif [[ "$(id -u)" -eq "$target_uid" ]]; then
-    env "${env_args[@]}" sh -c 'nohup "$@" </dev/null >/dev/null 2>&1 &' _ "${start_cmd[@]}"
-  fi
-  echo "[on-connect] Repositioned Plank dock for '$target_user' on $saved_display"
+  # Legacy hook retained as a no-op: the bottom dock is now managed by lxqt-panel (panel2),
+  # which automatically re-centers on X11 RandR display resize without restarting.
+  return 0
 }
 
 if [[ "${1:-}" == "--system-only" ]]; then
@@ -1182,10 +992,10 @@ ensure_user_in_kvm_group "$USERNAME"
 # overwrite newly written configuration files.
 terminate_user_xrdp_session "$USERNAME"
 
-echo "[status] Configuring LXQt desktop, wallpaper & Plank launchers..."
+echo "[status] Configuring LXQt desktop, wallpaper & dock launchers..."
 
-# 2. Enforce LXQt top panel configuration (~/.config/lxqt/panel.conf) & ensure panel is never disabled
-rm -f -- "$HOMEDIR/.config/autostart/lxqt-panel.desktop"
+# 2. Enforce LXQt top bar (panel1) & bottom centered dock (panel2) in ~/.config/lxqt/panel.conf
+rm -f -- "$HOMEDIR/.config/autostart/lxqt-panel.desktop" "$HOMEDIR/.config/autostart/plank.desktop"
 ensure_user_dir "$HOMEDIR/.local"
 ensure_user_dir "$HOMEDIR/.local/share"
 USER_APPS_DIR="$HOMEDIR/.local/share/applications"
@@ -1208,6 +1018,36 @@ Categories=System;
 EOF
 fi
 
+HOME_LAUNCHER_PATH="$APPS_DIR/apigee-user-home.desktop"
+if [[ ! -f "$HOME_LAUNCHER_PATH" ]]; then
+  HOME_LAUNCHER_PATH="$USER_APPS_DIR/apigee-user-home.desktop"
+  write_user_file "$HOME_LAUNCHER_PATH" 0644 <<'EOF' || true
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Home
+Comment=Open Home Folder
+Exec=sh -c 'exec pcmanfm-qt "$HOME"'
+Icon=user-home
+Terminal=false
+NoDisplay=true
+Categories=System;FileManager;
+EOF
+fi
+
+TERM_DESKTOP_PATH="$(resolve_or_create_desktop "terminal" "QTerminal" "qterminal" "utilities-terminal" \
+  qterminal.desktop org.lxqt.QTerminal.desktop org.lxqt.qterminal.desktop lxterminal.desktop xfce4-terminal.desktop xterm.desktop)"
+EDITOR_DESKTOP_PATH="$(resolve_or_create_desktop "text-editor" "FeatherPad" "featherpad %F" "featherpad" \
+  featherpad.desktop org.featherpad.FeatherPad.desktop mousepad.desktop org.gnome.TextEditor.desktop)"
+CHROME_DESKTOP_PATH="$(resolve_or_create_desktop "chrome" "Google Chrome" "google-chrome-stable %U" "google-chrome" \
+  google-chrome.desktop google-chrome-stable.desktop chromium.desktop)"
+CODIUM_DESKTOP_PATH="$(resolve_or_create_desktop "codium" "VSCodium" "codium %F" "vscodium" \
+  codium.desktop vscodium.desktop com.vscodium.codium.desktop)"
+ANTIGRAVITY_DESKTOP_PATH="$(resolve_or_create_desktop "antigravity" "Antigravity" "/opt/antigravity/antigravity %U" "antigravity" \
+  antigravity.desktop)"
+CLAUDE_DESKTOP_PATH="$(resolve_or_create_desktop "claude" "Claude" "claude-desktop %U" "claude-desktop" \
+  com.anthropic.Claude.desktop claude-desktop.desktop)"
+
 LXQT_MENU_FILE="/etc/xdg/menus/lxqt-applications.menu"
 if [[ ! -f "$LXQT_MENU_FILE" && -f /etc/xdg/menus/lxqt-panel-applications.menu ]]; then
   LXQT_MENU_FILE="/etc/xdg/menus/lxqt-panel-applications.menu"
@@ -1218,7 +1058,7 @@ write_panel_conf() {
   write_user_file "$PANEL_CONF" 0644 <<EOF
 [General]
 __userfile__=true
-panels=panel1
+panels=panel1, panel2
 
 [panel1]
 alignment=center
@@ -1259,6 +1099,38 @@ alignment=Right
 type=quicklaunch
 apps\\1\\desktop=$SIGNOUT_LAUNCHER_PATH
 apps\\size=1
+
+[panel2]
+alignment=center
+position=Bottom
+height=54
+iconSize=40
+width=100
+width-percent=true
+reserve-space=true
+hidable=false
+plugins=dock_spacer_left, dock_launchers, dock_spacer_right
+
+[dock_spacer_left]
+type=spacer
+size=0
+expandable=true
+spaceType=invisible
+
+[dock_launchers]
+type=quicklaunch
+apps\\1\\desktop=$CHROME_DESKTOP_PATH
+apps\\2\\desktop=$HOME_LAUNCHER_PATH
+apps\\3\\desktop=$EDITOR_DESKTOP_PATH
+apps\\4\\desktop=$ANTIGRAVITY_DESKTOP_PATH
+apps\\5\\desktop=$CLAUDE_DESKTOP_PATH
+apps\\size=5
+
+[dock_spacer_right]
+type=spacer
+size=0
+expandable=true
+spaceType=invisible
 EOF
 }
 
@@ -1414,74 +1286,23 @@ write_user_file "$PORTALS_CONF" 0644 <<'EOF' || true
 default=gtk
 EOF
 
-PLANK_START_CMD="env NO_AT_BRIDGE=1 GTK_USE_PORTAL=0 GDK_DEBUG=no-portals GIO_USE_PORTALS=0 plank"
-if [[ -x /usr/local/bin/apigee-start-plank ]]; then
-  PLANK_START_CMD="/usr/local/bin/apigee-start-plank"
-fi
-
-PLANK_AUTOSTART="$HOMEDIR/.config/autostart/plank.desktop"
-write_user_file "$PLANK_AUTOSTART" 0644 <<EOF || true
-[Desktop Entry]
-Type=Application
-Name=Plank
-Comment=Dock
-Exec=$PLANK_START_CMD
-Icon=plank
-Terminal=false
-Hidden=false
-NoDisplay=false
-EOF
+rm -f -- "$HOMEDIR/.config/autostart/plank.desktop"
 
 SESSION_INIT_AUTOSTART="$HOMEDIR/.config/autostart/apigee-session-init.desktop"
 write_user_file "$SESSION_INIT_AUTOSTART" 0644 <<'EOF' || true
 [Desktop Entry]
 Type=Application
 Name=Apigee Session Setup
-Comment=Marks desktop shortcuts trusted and verifies panel & dock
+Comment=Marks desktop shortcuts trusted and verifies LXQt panel
 Exec=/usr/local/bin/apigee-session-init
 Terminal=false
 Hidden=false
 NoDisplay=true
 EOF
 
-# 5. Populate Desktop shortcuts (~/Desktop) & Plank launchers (dock1/launchers)
+# 5. Populate Desktop shortcuts (~/Desktop)
 DESKTOP_DIR="$HOMEDIR/Desktop"
-PLANK_LAUNCHERS_DIR="$HOMEDIR/.config/plank/dock1/launchers"
 ensure_user_dir "$DESKTOP_DIR"
-ensure_user_dir "$HOMEDIR/.config/plank"
-ensure_user_dir "$HOMEDIR/.config/plank/dock1"
-ensure_user_dir "$PLANK_LAUNCHERS_DIR"
-
-# Ensure per-user Home folder launcher exists (used by Plank's Home dock icon)
-HOME_LAUNCHER_PATH="$APPS_DIR/apigee-user-home.desktop"
-if [[ ! -f "$HOME_LAUNCHER_PATH" ]]; then
-  HOME_LAUNCHER_PATH="$USER_APPS_DIR/apigee-user-home.desktop"
-  write_user_file "$HOME_LAUNCHER_PATH" 0644 <<'EOF' || true
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Home
-Comment=Open Home Folder
-Exec=sh -c 'exec pcmanfm-qt "$HOME"'
-Icon=user-home
-Terminal=false
-NoDisplay=true
-Categories=System;FileManager;
-EOF
-fi
-
-TERM_DESKTOP_PATH="$(resolve_or_create_desktop "terminal" "QTerminal" "qterminal" "utilities-terminal" \
-  qterminal.desktop org.lxqt.QTerminal.desktop org.lxqt.qterminal.desktop lxterminal.desktop xfce4-terminal.desktop xterm.desktop)"
-EDITOR_DESKTOP_PATH="$(resolve_or_create_desktop "text-editor" "FeatherPad" "featherpad %F" "featherpad" \
-  featherpad.desktop org.featherpad.FeatherPad.desktop mousepad.desktop org.gnome.TextEditor.desktop)"
-CHROME_DESKTOP_PATH="$(resolve_or_create_desktop "chrome" "Google Chrome" "google-chrome-stable %U" "google-chrome" \
-  google-chrome.desktop google-chrome-stable.desktop chromium.desktop)"
-CODIUM_DESKTOP_PATH="$(resolve_or_create_desktop "codium" "VSCodium" "codium %F" "vscodium" \
-  codium.desktop vscodium.desktop com.vscodium.codium.desktop)"
-ANTIGRAVITY_DESKTOP_PATH="$(resolve_or_create_desktop "antigravity" "Antigravity" "/opt/antigravity/antigravity %U" "antigravity" \
-  antigravity.desktop)"
-CLAUDE_DESKTOP_PATH="$(resolve_or_create_desktop "claude" "Claude" "claude-desktop %U" "claude-desktop" \
-  com.anthropic.Claude.desktop claude-desktop.desktop)"
 
 # Shortcuts placed on ~/Desktop: Terminal, Chrome, VSCodium, Antigravity, Claude (remove old/url-handler shortcuts).
 # Written as Type=Link shortcuts targeting /usr/share/applications/*.desktop: in LXQt libfm-qt
@@ -1546,67 +1367,6 @@ for existing_desk in "$DESKTOP_DIR"/*.desktop; do
     *) rm -f -- "$existing_desk" ;;
   esac
 done
-
-# Exact Plank dock items: Chrome, Home, Text Editor, Antigravity, Claude
-declare -A EXPECTED_DOCKITEMS=()
-PLANK_CHANGED=0
-
-add_plank_item() {
-  local idx="$1"
-  local slug="$2"
-  local launcher_path="$3"
-  [[ ! -f "$launcher_path" ]] && return 0
-
-  local dockitem_name
-  dockitem_name="$(printf '%02d-%s.dockitem' "$idx" "$slug")"
-  EXPECTED_DOCKITEMS["$dockitem_name"]=1
-
-  if write_user_file "$PLANK_LAUNCHERS_DIR/$dockitem_name" 0644 <<EOF
-[PlankItemsDockItemPreferences]
-Launcher=file://$launcher_path
-EOF
-  then
-    PLANK_CHANGED=1
-  fi
-}
-
-add_plank_item 1 "chrome" "$CHROME_DESKTOP_PATH"
-add_plank_item 2 "home" "$HOME_LAUNCHER_PATH"
-add_plank_item 3 "text-editor" "$EDITOR_DESKTOP_PATH"
-add_plank_item 4 "antigravity" "$ANTIGRAVITY_DESKTOP_PATH"
-add_plank_item 5 "claude" "$CLAUDE_DESKTOP_PATH"
-
-# Remove ALL other .dockitem files (including Plank's unnumbered first-run defaults like pcmanfm-qt/clock)
-for existing_item in "$PLANK_LAUNCHERS_DIR"/*.dockitem; do
-  [[ ! -e "$existing_item" ]] && continue
-  item_base="$(basename -- "$existing_item")"
-  if [[ -z "${EXPECTED_DOCKITEMS[$item_base]:-}" ]]; then
-    rm -f -- "$existing_item"
-    PLANK_CHANGED=1
-  fi
-done
-
-# Pre-compile per-user ~/.config/dconf/user offline before xrdp starts so even on first login
-# Plank immediately sees all 5 dock-items without running make_default_items()
-if command -v dconf >/dev/null 2>&1; then
-  ensure_user_dir "$HOMEDIR/.config/dconf"
-  DCONF_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/apigee-dconf.XXXXXX")"
-  mkdir -p -- "$DCONF_STAGE/src.d"
-  cat >"$DCONF_STAGE/src.d/00-plank" <<'EOF'
-[net/launchpad/plank/docks/dock1]
-dock-items=['01-chrome.dockitem', '02-home.dockitem', '03-text-editor.dockitem', '04-antigravity.dockitem', '05-claude.dockitem']
-show-dock-item=false
-pinned-only=false
-hide-mode='none'
-position='bottom'
-alignment='center'
-items-alignment='center'
-EOF
-  if dconf compile "$DCONF_STAGE/user" "$DCONF_STAGE/src.d" 2>/dev/null && [[ -s "$DCONF_STAGE/user" ]]; then
-    write_user_file "$HOMEDIR/.config/dconf/user" 0644 <"$DCONF_STAGE/user" || true
-  fi
-  rm -rf -- "$DCONF_STAGE"
-fi
 
 # Keep ~/.local/bin/agy and ~/.local/bin/claude aligned with system binaries if user had older local copies
 if [[ -x /usr/local/bin/agy && -e "$HOMEDIR/.local/bin/agy" && ! -L "$HOMEDIR/.local/bin/agy" ]]; then
