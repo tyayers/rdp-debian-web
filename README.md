@@ -38,6 +38,8 @@ cp .env.example .env
 HOST=0.0.0.0
 PORT=8080
 SESSION_SECRET=replace-with-openssl-rand-hex-32
+# Optional: allow WebSocket connections from multiple domains (comma-separated)
+# ALLOWED_ORIGINS=https://iap-domain.example.com,https://direct-domain.example.com
 ```
 
 ### 3. Start the Server
