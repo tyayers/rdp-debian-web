@@ -660,7 +660,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     const tint2Conf = await fs.readFile(path.join(freshHome, ".config", "tint2", "tint2rc"), "utf8");
     expect(tint2Conf).toContain("panel_position = bottom center horizontal");
     expect(tint2Conf).toContain("background_color = #000000 0");
-    expect(tint2Conf).toContain("launcher_icon_size = 54");
+    expect(tint2Conf).toContain("launcher_icon_size = 48");
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "google-chrome.desktop")}`);
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "apigee-user-home.desktop")}`);
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "featherpad.desktop")}`);
@@ -757,7 +757,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     const bobPanelConf = await fs.readFile(path.join(fallbackHome, ".config", "lxqt", "panel.conf"), "utf8");
     expect(bobPanelConf).toContain("panels=panel1");
     const bobTint2Conf = await fs.readFile(path.join(fallbackHome, ".config", "tint2", "tint2rc"), "utf8");
-    expect(bobTint2Conf).toContain("launcher_icon_size = 54");
+    expect(bobTint2Conf).toContain("launcher_icon_size = 48");
     const bobCodiumDesktop = await fs.readFile(
       path.join(fallbackHome, "Desktop", "codium.desktop"),
       "utf8"
