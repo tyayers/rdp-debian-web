@@ -273,7 +273,7 @@ install_or_update_system_tools() {
   # 1a. Base desktop packages: QTerminal, PCManFM-Qt, FeatherPad, LXQt panel/session/menu data, Adwaita icons, GIO/GVFS, zstd, XDG utils & GTK portal
   local missing_base=0
   local cmd
-  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel lxqt-config tint2 picom setxkbmap gxkb qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
+  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel lxqt-config tint2 picom setxkbmap qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
@@ -287,7 +287,7 @@ install_or_update_system_tools() {
     apt_get update -qq
     apt_get install -y -qq --no-install-recommends \
       ca-certificates curl gpg zstd xdg-utils desktop-file-utils \
-      adwaita-icon-theme librsvg2-common tint2 picom x11-xkb-utils xkb-data gxkb qterminal pcmanfm-qt featherpad \
+      adwaita-icon-theme librsvg2-common tint2 picom x11-xkb-utils xkb-data qterminal pcmanfm-qt featherpad \
       lxqt-menu-data lxqt-config lxqt-panel lxqt-session libglib2.0-bin gvfs \
       dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
@@ -654,20 +654,11 @@ apply_trust() {
 }
 
 ensure_panel_running() {
-  local picom_started=0
   if command -v picom >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x picom >/dev/null 2>&1; then
     nohup picom --backend xrender --no-fading-openclose --no-vsync </dev/null >/dev/null 2>&1 &
-    picom_started=1
-    sleep 0.4
   fi
-  if command -v lxqt-panel >/dev/null 2>&1; then
-    if [[ "$picom_started" -eq 1 ]] && pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
-      pkill -TERM -u "$(id -u)" -x lxqt-panel 2>/dev/null || true
-      sleep 0.3
-    fi
-    if ! pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
-      nohup lxqt-panel </dev/null >/dev/null 2>&1 &
-    fi
+  if command -v lxqt-panel >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
+    nohup lxqt-panel </dev/null >/dev/null 2>&1 &
   fi
   if command -v tint2 >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x tint2 >/dev/null 2>&1; then
     nohup tint2 </dev/null >/dev/null 2>&1 &
@@ -695,14 +686,12 @@ apply_keyboard_layouts() {
 
 apply_trust
 apply_keyboard_layouts
-if [[ "${1:-}" == "--Immediate" ]]; then
-  ensure_panel_running
-else
+ensure_panel_running
+if [[ "${1:-}" != "--Immediate" ]]; then
   (
     sleep 2
     apply_trust
     apply_keyboard_layouts
-    ensure_panel_running
   ) </dev/null >/dev/null 2>&1 &
 fi
 EOF
@@ -1191,7 +1180,7 @@ iconSize=22
 width=100
 width-percent=true
 reserve-space=true
-plugins=mainmenu, taskbar, spacer, tray, signout
+plugins=mainmenu, taskbar, spacer, kbindicator, signout
 
 [mainmenu]
 type=mainmenu
@@ -1209,9 +1198,13 @@ size=0
 expandable=true
 spaceType=invisible
 
-[tray]
+[kbindicator]
 alignment=Right
-type=tray
+type=kbindicator
+showLayout=true
+showCapslock=true
+showNumlock=false
+showScrolllock=false
 
 [signout]
 alignment=Right
@@ -1651,33 +1644,7 @@ Hidden=false
 NoDisplay=true
 EOF
 
-GXKB_CONF="$HOMEDIR/.config/gxkb/gxkb.cfg"
-if [[ ! -f "$GXKB_CONF" ]]; then
-  ensure_user_dir "$HOMEDIR/.config/gxkb"
-  write_user_file "$GXKB_CONF" 0644 <<'EOF' || true
-[xkb config]
-group_policy=2
-default_group=0
-never_modify_config=false
-model=pc105
-layouts=us,de,fr,es
-variants=,,,
-toggle_option=grp:alt_shift_toggle
-compose_key_position=
-EOF
-fi
-
-GXKB_AUTOSTART="$HOMEDIR/.config/autostart/gxkb.desktop"
-write_user_file "$GXKB_AUTOSTART" 0644 <<'EOF' || true
-[Desktop Entry]
-Type=Application
-Name=Keyboard Layout Indicator
-Comment=System tray keyboard layout dropdown menu
-Exec=gxkb
-Terminal=false
-Hidden=false
-NoDisplay=true
-EOF
+rm -f -- "$HOMEDIR/.config/autostart/gxkb.desktop"
 
 SESSION_INIT_AUTOSTART="$HOMEDIR/.config/autostart/apigee-session-init.desktop"
 write_user_file "$SESSION_INIT_AUTOSTART" 0644 <<'EOF' || true
