@@ -674,13 +674,34 @@ ensure_panel_running() {
   fi
 }
 
+apply_keyboard_layouts() {
+  local sess_conf="$HOME/.config/lxqt/session.conf"
+  if command -v setxkbmap >/dev/null 2>&1 && [[ -f "$sess_conf" ]]; then
+    local kb_layout kb_model kb_variant kb_options
+    kb_layout="$(awk -F= '/^\[Keyboard\]/{in_kb=1;next} /^\[/{in_kb=0} in_kb && /^layout=/{gsub(/^"|"$/,"",$2); print $2; exit}' "$sess_conf")"
+    kb_model="$(awk -F= '/^\[Keyboard\]/{in_kb=1;next} /^\[/{in_kb=0} in_kb && /^model=/{gsub(/^"|"$/,"",$2); print $2; exit}' "$sess_conf")"
+    kb_variant="$(awk -F= '/^\[Keyboard\]/{in_kb=1;next} /^\[/{in_kb=0} in_kb && /^variant=/{gsub(/^"|"$/,"",$2); print $2; exit}' "$sess_conf")"
+    kb_options="$(awk -F= '/^\[Keyboard\]/{in_kb=1;next} /^\[/{in_kb=0} in_kb && /^options=/{gsub(/^"|"$/,"",$2); print $2; exit}' "$sess_conf")"
+    if [[ -n "$kb_layout" ]]; then
+      local args=("-option")
+      [[ -n "$kb_model" ]] && args+=("-model" "$kb_model")
+      args+=("-layout" "$kb_layout")
+      [[ -n "$kb_variant" ]] && args+=("-variant" "$kb_variant")
+      [[ -n "$kb_options" ]] && args+=("-option" "$kb_options")
+      setxkbmap "${args[@]}" 2>/dev/null || true
+    fi
+  fi
+}
+
 apply_trust
+apply_keyboard_layouts
 if [[ "${1:-}" == "--Immediate" ]]; then
   ensure_panel_running
 else
   (
     sleep 2
     apply_trust
+    apply_keyboard_layouts
     ensure_panel_running
   ) </dev/null >/dev/null 2>&1 &
 fi
@@ -1209,21 +1230,63 @@ if write_panel_conf; then
   echo "[on-connect] Applied LXQt panel.conf for '$USERNAME'"
 fi
 
-# 2a. Seed default keyboard layouts (US default + German, French, Spanish) only if user hasn't customized them
+# 2a. Seed default keyboard layouts (US default + German, French, Spanish) if unset or still single 'us',
+#     preserving any custom layout selection the user has saved in ~/.config/lxqt/session.conf.
 LXQT_SESSION_CONF="$HOMEDIR/.config/lxqt/session.conf"
-if [[ ! -f "$LXQT_SESSION_CONF" ]] || ! grep -q '^layout=' "$LXQT_SESSION_CONF" 2>/dev/null; then
+CURRENT_KB_LAYOUT=""
+if [[ -f "$LXQT_SESSION_CONF" ]]; then
+  CURRENT_KB_LAYOUT="$(awk -F= '/^\[Keyboard\]/{in_kb=1;next} /^\[/{in_kb=0} in_kb && /^layout=/{gsub(/^"|"$/,"",$2); print $2; exit}' "$LXQT_SESSION_CONF" 2>/dev/null || true)"
+fi
+
+if [[ -z "$CURRENT_KB_LAYOUT" || "$CURRENT_KB_LAYOUT" == "us" ]]; then
   if [[ -f "$LXQT_SESSION_CONF" ]]; then
-    {
-      cat "$LXQT_SESSION_CONF"
-      printf '\n[Keyboard]\nlayout=us,de,fr,es\nmodel=pc105\noptions=grp:alt_shift_toggle\nvariant=,,,\n'
-    } | write_user_file "$LXQT_SESSION_CONF" 0644 || true
+    SESS_TMP="$(mktemp "${TMPDIR:-/tmp}/lxqt-session.XXXXXX")"
+    awk '
+      BEGIN { sec = ""; saw_kb = 0; set_l = 0; set_m = 0; set_o = 0; set_v = 0 }
+      function flush_kb() {
+        if (sec == "Keyboard") {
+          if (!set_l) { print "layout=\"us,de,fr,es\""; set_l = 1 }
+          if (!set_m) { print "model=pc105"; set_m = 1 }
+          if (!set_o) { print "options=grp:alt_shift_toggle"; set_o = 1 }
+          if (!set_v) { print "variant=\",,,\""; set_v = 1 }
+        }
+      }
+      /^\[[^]]+\][ \t]*$/ {
+        flush_kb()
+        sec = $0; sub(/^\[/, "", sec); sub(/\][ \t]*$/, "", sec)
+        if (sec == "Keyboard") saw_kb = 1
+        print $0; next
+      }
+      {
+        if (sec == "Keyboard") {
+          if ($0 ~ /^layout=/) { print "layout=\"us,de,fr,es\""; set_l = 1; next }
+          if ($0 ~ /^model=/) { print "model=pc105"; set_m = 1; next }
+          if ($0 ~ /^options=/) { print "options=grp:alt_shift_toggle"; set_o = 1; next }
+          if ($0 ~ /^variant=/) { print "variant=\",,,\""; set_v = 1; next }
+        }
+        print $0
+      }
+      END {
+        flush_kb()
+        if (!saw_kb) {
+          print ""
+          print "[Keyboard]"
+          print "layout=\"us,de,fr,es\""
+          print "model=pc105"
+          print "options=grp:alt_shift_toggle"
+          print "variant=\",,,\""
+        }
+      }
+    ' "$LXQT_SESSION_CONF" >"$SESS_TMP"
+    write_user_file "$LXQT_SESSION_CONF" 0644 <"$SESS_TMP" || true
+    rm -f -- "$SESS_TMP"
   else
     write_user_file "$LXQT_SESSION_CONF" 0644 <<'EOF' || true
 [Keyboard]
-layout=us,de,fr,es
+layout="us,de,fr,es"
 model=pc105
 options=grp:alt_shift_toggle
-variant=,,,
+variant=",,,"
 EOF
   fi
 fi
