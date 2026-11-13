@@ -655,7 +655,8 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     expect(firstPass).toContain("menu_file=/etc/xdg/menus/");
     expect(firstPass).toContain("spaceType=invisible");
     expect(firstPass).toContain("[signout]\nalignment=Right\ntype=quicklaunch");
-    expect(firstPass).toContain("[panel2]\nalignment=center\nposition=Bottom");
+    expect(firstPass).toContain("[panel2]\nalignment=center\nposition=Bottom\nheight=96\niconSize=80");
+    expect(firstPass).toContain("opacity=0");
     expect(firstPass).toContain("plugins=dock_spacer_left, dock_launchers, dock_spacer_right");
     expect(firstPass).toContain(`apps\\1\\desktop=${path.join(mockAppsDir, "google-chrome.desktop")}`);
     expect(firstPass).toContain(`apps\\2\\desktop=${path.join(mockAppsDir, "apigee-user-home.desktop")}`);

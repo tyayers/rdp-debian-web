@@ -273,7 +273,7 @@ install_or_update_system_tools() {
   # 1a. Base desktop packages: QTerminal, PCManFM-Qt, FeatherPad, LXQt panel/session/menu data, Adwaita icons, GIO/GVFS, zstd, XDG utils & GTK portal
   local missing_base=0
   local cmd
-  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
+  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel picom qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
@@ -287,7 +287,7 @@ install_or_update_system_tools() {
     apt_get update -qq
     apt_get install -y -qq --no-install-recommends \
       ca-certificates curl gpg zstd xdg-utils desktop-file-utils \
-      adwaita-icon-theme librsvg2-common qterminal pcmanfm-qt featherpad \
+      adwaita-icon-theme librsvg2-common picom qterminal pcmanfm-qt featherpad \
       lxqt-menu-data lxqt-panel lxqt-session libglib2.0-bin gvfs \
       dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
@@ -654,6 +654,9 @@ apply_trust() {
 }
 
 ensure_panel_running() {
+  if command -v picom >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x picom >/dev/null 2>&1; then
+    nohup picom --backend xrender --no-fading-openclose </dev/null >/dev/null 2>&1 &
+  fi
   if command -v lxqt-panel >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x lxqt-panel >/dev/null 2>&1; then
     nohup lxqt-panel </dev/null >/dev/null 2>&1 &
   fi
@@ -803,7 +806,7 @@ list_user_xrdp_pids() {
     comm=""
     read -r comm <"/proc/$pid/comm" 2>/dev/null || true
     case "$comm" in
-      lxqt-session|lxqt-panel|pcmanfm-qt|plank|bamfdaemon|xdg-desktop-por|openbox|xfwm4|xrdp-chansrv|Xorg|Xvnc)
+      lxqt-session|lxqt-panel|pcmanfm-qt|picom|plank|bamfdaemon|xdg-desktop-por|openbox|xfwm4|xrdp-chansrv|Xorg|Xvnc)
         printf '%s\n' "$pid"
         continue
         ;;
@@ -1103,12 +1106,13 @@ apps\\size=1
 [panel2]
 alignment=center
 position=Bottom
-height=54
-iconSize=40
+height=96
+iconSize=80
 width=100
 width-percent=true
 reserve-space=true
 hidable=false
+opacity=0
 plugins=dock_spacer_left, dock_launchers, dock_spacer_right
 
 [dock_spacer_left]
@@ -1287,6 +1291,18 @@ default=gtk
 EOF
 
 rm -f -- "$HOMEDIR/.config/autostart/plank.desktop"
+
+PICOM_AUTOSTART="$HOMEDIR/.config/autostart/picom.desktop"
+write_user_file "$PICOM_AUTOSTART" 0644 <<'EOF' || true
+[Desktop Entry]
+Type=Application
+Name=Picom Compositor
+Comment=Lightweight X11 compositor for panel transparency
+Exec=picom --backend xrender --no-fading-openclose
+Terminal=false
+Hidden=false
+NoDisplay=true
+EOF
 
 SESSION_INIT_AUTOSTART="$HOMEDIR/.config/autostart/apigee-session-init.desktop"
 write_user_file "$SESSION_INIT_AUTOSTART" 0644 <<'EOF' || true
