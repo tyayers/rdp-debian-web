@@ -43,7 +43,7 @@ async function generateSelfSignedPem(dir: string): Promise<{ key: string; cert: 
   };
 }
 
-describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisioning, and IronRDP WASM", () => {
+describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisioning, and IronRDP WASM", () => {
   let tmpDir = "";
   let fakePasswdPath = "";
   let usersYamlPath = "";
@@ -180,7 +180,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     }
   });
 
-  test("serves Apigee AI Demos frontend with CSP nonce and defaults usersFile to start directory", async () => {
+  test("serves Apigee AI Journeys frontend with CSP nonce and defaults usersFile to start directory", async () => {
     const defaultCfg = loadConfig({ NODE_ENV: "test" });
     expect(defaultCfg.usersFile).toBe(path.join(process.cwd(), "users.yaml"));
 
@@ -190,7 +190,8 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     const csp = res.headers.get("content-security-policy") ?? "";
     expect(csp).toContain("'wasm-unsafe-eval'");
     const html = await res.text();
-    expect(html).toContain("<title>Apigee AI Demos</title>");
+    expect(html).toContain("<title>Apigee AI Journeys</title>");
+    expect(html).not.toContain("Fit display");
     expect(html).not.toContain("{{CSP_NONCE}}");
 
     const headRoot = await fetch(`${baseUrl}/`, { method: "HEAD" });
@@ -571,6 +572,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       "codium.desktop",
       "antigravity.desktop",
       "com.anthropic.Claude.desktop",
+      "lxqt-config.desktop",
     ]) {
       await fs.writeFile(
         path.join(mockAppsDir, appFile),
@@ -672,6 +674,7 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "featherpad.desktop")}`);
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "antigravity.desktop")}`);
     expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "com.anthropic.Claude.desktop")}`);
+    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "lxqt-config.desktop")}`);
     expect(await Bun.file(path.join(autostartDir, "tint2.desktop")).exists()).toBe(true);
     expect(wallpaperStat.size).toBe(sourceWallpaperStat.size);
     expect(pcmanfmConf).toContain("QuickExec=true");
@@ -682,7 +685,8 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
       "utf8"
     );
     expect(desktopItemsConf).toContain("[google-chrome.desktop]\npos=@Point(16 16)");
-    expect(desktopItemsConf).toContain("[Trash]\npos=@Point(16 616)");
+    expect(desktopItemsConf).toContain("[lxqt-config.desktop]\npos=@Point(16 616)");
+    expect(desktopItemsConf).toContain("[Trash]\npos=@Point(16 716)");
     const qtermIni = await fs.readFile(
       path.join(freshHome, ".config", "qterminal.org", "qterminal.ini"),
       "utf8"
@@ -718,6 +722,11 @@ describe("Apigee AI Demos — GCP IAP / ?user= Auth, users.yaml Auto-Provisionin
         shortcutFile: "claude.desktop",
         sourceAppFile: "com.anthropic.Claude.desktop",
         expectedTitle: "Claude",
+      },
+      {
+        shortcutFile: "lxqt-config.desktop",
+        sourceAppFile: "lxqt-config.desktop",
+        expectedTitle: "Configuration Center",
       },
     ];
 

@@ -437,7 +437,7 @@ if (import.meta.main) {
   const { server, config, vmUsers } = createAppServer();
   const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
   console.log(
-    `[Apigee AI Demos] Listening on http://${server.hostname}:${server.port} | xrdp=${config.rdpHost}:${config.rdpPort} | usersFile=${config.usersFile}${
+    `[Apigee AI Journeys] Listening on http://${server.hostname}:${server.port} | xrdp=${config.rdpHost}:${config.rdpPort} | usersFile=${config.usersFile}${
       !isRoot ? " | privilege=sudo -n (run with sudo if passwordless sudo is not configured)" : " | privilege=root"
     }`
   );

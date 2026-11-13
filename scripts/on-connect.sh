@@ -273,7 +273,7 @@ install_or_update_system_tools() {
   # 1a. Base desktop packages: QTerminal, PCManFM-Qt, FeatherPad, LXQt panel/session/menu data, Adwaita icons, GIO/GVFS, zstd, XDG utils & GTK portal
   local missing_base=0
   local cmd
-  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel tint2 picom setxkbmap qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
+  for cmd in curl gpg zstd xdg-open update-desktop-database lxqt-panel lxqt-config tint2 picom setxkbmap qterminal pcmanfm-qt featherpad lxqt-leave gio dbus-update-activation-environment; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_base=1
       break
@@ -288,7 +288,7 @@ install_or_update_system_tools() {
     apt_get install -y -qq --no-install-recommends \
       ca-certificates curl gpg zstd xdg-utils desktop-file-utils \
       adwaita-icon-theme librsvg2-common tint2 picom x11-xkb-utils xkb-data qterminal pcmanfm-qt featherpad \
-      lxqt-menu-data lxqt-panel lxqt-session libglib2.0-bin gvfs \
+      lxqt-menu-data lxqt-config lxqt-panel lxqt-session libglib2.0-bin gvfs \
       dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk
   fi
 
@@ -1154,6 +1154,8 @@ ANTIGRAVITY_DESKTOP_PATH="$(resolve_or_create_desktop "antigravity" "Antigravity
   antigravity.desktop)"
 CLAUDE_DESKTOP_PATH="$(resolve_or_create_desktop "claude" "Claude" "claude-desktop %U" "claude-desktop" \
   com.anthropic.Claude.desktop claude-desktop.desktop)"
+CONFIG_DESKTOP_PATH="$(resolve_or_create_desktop "settings" "Configuration Center" "lxqt-config" "preferences-system" \
+  lxqt-config.desktop org.lxqt.lxqt-config.desktop)"
 
 LXQT_MENU_FILE="/etc/xdg/menus/lxqt-applications.menu"
 if [[ ! -f "$LXQT_MENU_FILE" && -f /etc/xdg/menus/lxqt-panel-applications.menu ]]; then
@@ -1391,6 +1393,7 @@ launcher_item_app = $HOME_LAUNCHER_PATH
 launcher_item_app = $EDITOR_DESKTOP_PATH
 launcher_item_app = $ANTIGRAVITY_DESKTOP_PATH
 launcher_item_app = $CLAUDE_DESKTOP_PATH
+launcher_item_app = $CONFIG_DESKTOP_PATH
 EOF
 
 # 3. Copy wallpaper.jpg into user's home directory & configure PCManFM-Qt (both lxqt and default profiles!)
@@ -1536,8 +1539,11 @@ pos=@Point(16 416)
 [codium.desktop]
 pos=@Point(16 516)
 
-[Trash]
+[lxqt-config.desktop]
 pos=@Point(16 616)
+
+[Trash]
+pos=@Point(16 716)
 EOF
 }
 
@@ -1705,12 +1711,13 @@ write_desktop_shortcut "$CHROME_DESKTOP_PATH" "$DESKTOP_DIR/google-chrome.deskto
 write_desktop_shortcut "$CODIUM_DESKTOP_PATH" "$DESKTOP_DIR/codium.desktop" "VSCodium"
 write_desktop_shortcut "$ANTIGRAVITY_DESKTOP_PATH" "$DESKTOP_DIR/antigravity.desktop" "Antigravity"
 write_desktop_shortcut "$CLAUDE_DESKTOP_PATH" "$DESKTOP_DIR/claude.desktop" "Claude"
+write_desktop_shortcut "$CONFIG_DESKTOP_PATH" "$DESKTOP_DIR/lxqt-config.desktop" "Configuration Center"
 
 # Remove any other stale .desktop shortcut names left in ~/Desktop from previous runs
 for existing_desk in "$DESKTOP_DIR"/*.desktop; do
   [[ ! -e "$existing_desk" ]] && continue
   case "$(basename -- "$existing_desk")" in
-    qterminal.desktop|google-chrome.desktop|codium.desktop|antigravity.desktop|claude.desktop) ;;
+    qterminal.desktop|google-chrome.desktop|codium.desktop|antigravity.desktop|claude.desktop|lxqt-config.desktop) ;;
     *) rm -f -- "$existing_desk" ;;
   esac
 done

@@ -45,7 +45,6 @@ const el = {
   rdpStatusText: document.getElementById("rdp-status-text"),
   clipboardBtn: document.getElementById("clipboard-btn"),
   cadBtn: document.getElementById("cad-btn"),
-  recalibrateBtn: document.getElementById("recalibrate-btn"),
   fullscreenBtn: document.getElementById("fullscreen-btn"),
   disconnectBtn: document.getElementById("disconnect-btn"),
 
@@ -223,7 +222,6 @@ function ensureRdpViewer() {
         el.disconnectBtn.hidden = false;
         el.clipboardBtn.disabled = false;
         el.cadBtn.disabled = false;
-        el.recalibrateBtn.disabled = false;
         el.rdpReconnectBtn.textContent = "Reconnect to desktop";
         el.rdpReconnectBtn.hidden = true;
         setBanner(el.rdpErrorBanner, "");
@@ -254,7 +252,6 @@ function ensureRdpViewer() {
         el.disconnectBtn.hidden = true;
         el.clipboardBtn.disabled = true;
         el.cadBtn.disabled = true;
-        el.recalibrateBtn.disabled = true;
         setBanner(el.rdpErrorBanner, detail || "Unable to establish xrdp session.");
       } else {
         state.connecting = false;
@@ -268,7 +265,6 @@ function ensureRdpViewer() {
         el.disconnectBtn.hidden = true;
         el.clipboardBtn.disabled = true;
         el.cadBtn.disabled = true;
-        el.recalibrateBtn.disabled = true;
       }
     },
     onRemoteClipboard: (text) => {
@@ -340,7 +336,7 @@ function renderAuthenticatedWorkspace() {
     el.navToggleBtn.hidden = true;
     el.openNewTabLink.hidden = true;
     el.standaloneBadge.hidden = false;
-    document.title = `Desktop (${state.user.username}) · Apigee AI Demos`;
+    document.title = `Desktop (${state.user.username}) · Apigee AI Journeys`;
     if (handoffChannel) {
       handoffChannel.postMessage({ type: "claimed_standalone_tab", username: state.user.username });
     }
@@ -401,7 +397,6 @@ async function bootstrap() {
     el.disconnectBtn.hidden = true;
     el.clipboardBtn.disabled = true;
     el.cadBtn.disabled = true;
-    el.recalibrateBtn.disabled = true;
   });
 
   // Immediately close WebSocket on tab close / reload so the VM desktop session signs out right away
@@ -411,11 +406,6 @@ async function bootstrap() {
 
   el.cadBtn.addEventListener("click", () => {
     state.viewer?.sendCtrlAltDel();
-    el.rdpCanvas.focus();
-  });
-
-  el.recalibrateBtn.addEventListener("click", () => {
-    state.viewer?.recalibrateViewport();
     el.rdpCanvas.focus();
   });
 
