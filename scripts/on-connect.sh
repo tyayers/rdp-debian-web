@@ -16,8 +16,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_WALLPAPER_SRC="$SCRIPT_DIR/../public/wallpaper.jpg"
 WALLPAPER_SRC="${ON_CONNECT_WALLPAPER_SRC:-$DEFAULT_WALLPAPER_SRC}"
-DEFAULT_ANTIGRAVITY_ADMIN_SETTINGS_SRC="$SCRIPT_DIR/../config/admin_settings.json"
+DEFAULT_ANTIGRAVITY_ADMIN_SETTINGS_SRC="$SCRIPT_DIR/../config/antigravity_settings.json"
 ANTIGRAVITY_ADMIN_SETTINGS_SRC="${ON_CONNECT_ANTIGRAVITY_ADMIN_SETTINGS_SRC:-$DEFAULT_ANTIGRAVITY_ADMIN_SETTINGS_SRC}"
+DEFAULT_ANTHROPIC_SETTINGS_SRC="$SCRIPT_DIR/../config/anthropic_settings.json"
+ANTHROPIC_SETTINGS_SRC="${ON_CONNECT_ANTHROPIC_SETTINGS_SRC:-$DEFAULT_ANTHROPIC_SETTINGS_SRC}"
 APPS_DIR="${ON_CONNECT_APPS_DIR:-/usr/share/applications}"
 
 parse_json_string() {
@@ -166,18 +168,8 @@ install_or_update_claude_code() {
   fi
 
   # Prevent non-root users from failing on self-updates against root-owned /usr/local/bin/claude
-  # or duplicating 350MB+ binaries inside every user's home directory
-  local managed_settings="${claude_etc_dir}/managed-settings.json"
-  if [[ ! -f "$managed_settings" ]]; then
-    cat >"$managed_settings" <<'EOF'
-{
-  "env": {
-    "DISABLE_AUTOUPDATER": "1"
-  }
-}
-EOF
-    chmod 0644 "$managed_settings"
-  fi
+  # or duplicating 350MB+ binaries inside every user's home directory, and apply ANTHROPIC_* gateway settings
+  configure_anthropic_managed_settings
 }
 
 json_escape_string() {
@@ -190,8 +182,67 @@ json_escape_string() {
   printf '%s' "$s"
 }
 
-render_antigravity_settings_to() {
-  local target_file="$1"
+configure_anthropic_managed_settings() {
+  local claude_etc_dir="${ON_CONNECT_CLAUDE_ETC_DIR:-/etc/claude-code}"
+  local target_file="${claude_etc_dir}/managed-settings.json"
+  install -d -m 0755 "$claude_etc_dir"
+
+  local tmp_out
+  tmp_out="$(mktemp "${TMPDIR:-/tmp}/anthropic-managed-settings.XXXXXX")"
+
+  if [[ -f "$ANTHROPIC_SETTINGS_SRC" ]] && command -v python3 >/dev/null 2>&1; then
+    TEMPLATE_PATH="$ANTHROPIC_SETTINGS_SRC" OUT_PATH="$tmp_out" python3 - <<'PY'
+import json, os
+
+keys = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+]
+with open(os.environ["TEMPLATE_PATH"], "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+env_obj = data.get("env")
+if not isinstance(env_obj, dict):
+    env_obj = {}
+
+for k in keys:
+    val = os.environ.get(k, "")
+    if val:
+        env_obj[k] = val
+    elif env_obj.get(k) == f"__{k}__":
+        env_obj.pop(k, None)
+
+data["env"] = env_obj
+with open(os.environ["OUT_PATH"], "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+  else
+    {
+      printf '{\n  "env": {\n    "DISABLE_AUTOUPDATER": "1"'
+      for k in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL; do
+        val="${!k:-}"
+        [[ -z "$val" ]] && continue
+        printf ',\n    "%s": "%s"' "$k" "$(json_escape_string "$val")"
+      done
+      printf '\n  }\n}\n'
+    } >"$tmp_out"
+  fi
+
+  chmod 0644 "$tmp_out"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown root:root -- "$tmp_out"
+  fi
+  mv -f -- "$tmp_out" "$target_file"
+}
+
+configure_antigravity_admin_settings() {
+  local antigravity_etc_dir="${ON_CONNECT_ANTIGRAVITY_ETC_DIR:-/etc/antigravity}"
+  local target_file="${antigravity_etc_dir}/admin_settings.json"
   local ag_url="${ANTIGRAVITY_URL:-}"
   local ag_key="${ANTIGRAVITY_KEY:-}"
 
@@ -200,12 +251,13 @@ render_antigravity_settings_to() {
   fi
 
   if [[ ! -f "$ANTIGRAVITY_ADMIN_SETTINGS_SRC" ]]; then
-    echo "[on-connect] Warning: Antigravity admin_settings.json template not found at $ANTIGRAVITY_ADMIN_SETTINGS_SRC" >&2
+    echo "[on-connect] Warning: Antigravity settings template not found at $ANTIGRAVITY_ADMIN_SETTINGS_SRC" >&2
     return 0
   fi
 
+  install -d -m 0755 "$antigravity_etc_dir"
   local tmp_out
-  tmp_out="$(mktemp "${TMPDIR:-/tmp}/antigravity-settings.XXXXXX")"
+  tmp_out="$(mktemp "${TMPDIR:-/tmp}/antigravity-admin-settings.XXXXXX")"
 
   if command -v python3 >/dev/null 2>&1; then
     TEMPLATE_PATH="$ANTIGRAVITY_ADMIN_SETTINGS_SRC" \
@@ -221,7 +273,6 @@ with open(os.environ["TEMPLATE_PATH"], "r", encoding="utf-8") as f:
 url_escaped = json.dumps(os.environ["AG_URL"])[1:-1]
 key_escaped = json.dumps(os.environ["AG_KEY"])[1:-1]
 rendered = raw.replace("__ANTIGRAVITY_URL__", url_escaped).replace("__ANTIGRAVITY_KEY__", key_escaped)
-# Validate JSON before writing
 json.loads(rendered)
 with open(os.environ["OUT_PATH"], "w", encoding="utf-8") as f:
     f.write(rendered)
@@ -239,8 +290,12 @@ PY
     ' "$ANTIGRAVITY_ADMIN_SETTINGS_SRC" >"$tmp_out"
   fi
 
-  write_user_file "$target_file" 0600 <"$tmp_out" || true
-  rm -f -- "$tmp_out"
+  chmod 0644 "$tmp_out"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown root:root -- "$tmp_out"
+  fi
+  mv -f -- "$tmp_out" "$target_file"
+  echo "[on-connect] Configured Antigravity enterprise gateway -> ${target_file}"
 }
 
 find_existing_desktop() {
@@ -426,10 +481,13 @@ EOF
     /usr/local/share/antigravity \
     /usr/local/share/claude-code \
     /etc/claude-code \
+    /etc/antigravity \
     /usr/share/pixmaps \
     /usr/share/icons/hicolor/256x256/apps \
     /usr/share/applications \
     /usr/share/backgrounds
+
+  configure_antigravity_admin_settings
 
   # Shared official Antigravity icon (installed into both pixmaps and hicolor theme for QIcon::fromTheme)
   if [[ ! -s /usr/share/pixmaps/antigravity.png ]]; then
@@ -1109,6 +1167,12 @@ if [[ "${1:-}" == "--install-claude-code-only" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "--configure-ai-settings-only" ]]; then
+  configure_antigravity_admin_settings
+  configure_anthropic_managed_settings
+  exit 0
+fi
+
 if [[ "${1:-}" == "--signout" ]]; then
   SIGNOUT_USER="${2:?Usage: on-connect.sh --signout <username>}"
   terminate_user_xrdp_session "$SIGNOUT_USER"
@@ -1485,9 +1549,9 @@ startup_notifications = 1
 launcher_tooltip = 1
 launcher_item_app = $CHROME_DESKTOP_PATH
 launcher_item_app = $HOME_LAUNCHER_PATH
-launcher_item_app = $EDITOR_DESKTOP_PATH
 launcher_item_app = $ANTIGRAVITY_DESKTOP_PATH
 launcher_item_app = $CLAUDE_DESKTOP_PATH
+launcher_item_app = $TERM_DESKTOP_PATH
 launcher_item_app = $SETTINGS_LAUNCHER_PATH
 EOF
 
@@ -1856,87 +1920,4 @@ if command -v codium >/dev/null 2>&1 && [[ -s "$CODIUM_AG_VSIX" ]]; then
       chown -R "$USER_UID:$USER_GID" -- "$HOMEDIR/.config/VSCodium" "$HOMEDIR/.vscode-oss" 2>/dev/null || true
     fi
   fi
-fi
-
-# Write per-user Antigravity settings (~/.antigravity/settings.json) when ANTIGRAVITY_URL and ANTIGRAVITY_KEY are set
-if [[ -n "${ANTIGRAVITY_URL:-}" && -n "${ANTIGRAVITY_KEY:-}" ]]; then
-  ensure_user_dir "$HOMEDIR/.antigravity"
-  render_antigravity_settings_to "$HOMEDIR/.antigravity/settings.json"
-fi
-
-# Write/merge per-user Claude Code settings (~/.claude/settings.json) when ANTHROPIC_* env vars are set
-ANTHROPIC_KEYS=(
-  ANTHROPIC_BASE_URL
-  ANTHROPIC_AUTH_TOKEN
-  ANTHROPIC_API_KEY
-  ANTHROPIC_DEFAULT_OPUS_MODEL
-  ANTHROPIC_DEFAULT_SONNET_MODEL
-  ANTHROPIC_DEFAULT_HAIKU_MODEL
-)
-HAS_ANTHROPIC_ENV=0
-for k in "${ANTHROPIC_KEYS[@]}"; do
-  if [[ -n "${!k:-}" ]]; then
-    HAS_ANTHROPIC_ENV=1
-    break
-  fi
-done
-if [[ "$HAS_ANTHROPIC_ENV" -eq 1 ]]; then
-  ensure_user_dir "$HOMEDIR/.claude"
-  CLAUDE_SETTINGS_FILE="$HOMEDIR/.claude/settings.json"
-  CLAUDE_TMP="$(mktemp "${TMPDIR:-/tmp}/claude-settings.XXXXXX")"
-  if command -v python3 >/dev/null 2>&1; then
-    CLAUDE_TARGET="$CLAUDE_SETTINGS_FILE" CLAUDE_TMP_OUT="$CLAUDE_TMP" python3 - <<'PY'
-import json, os
-
-keys = [
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-]
-target = os.environ["CLAUDE_TARGET"]
-data = {}
-if os.path.isfile(target):
-    try:
-        with open(target, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
-            if isinstance(loaded, dict):
-                data = loaded
-    except Exception:
-        data = {}
-
-env_obj = data.get("env")
-if not isinstance(env_obj, dict):
-    env_obj = {}
-
-for k in keys:
-    val = os.environ.get(k, "")
-    if val:
-        env_obj[k] = val
-
-data["env"] = env_obj
-with open(os.environ["CLAUDE_TMP_OUT"], "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-PY
-  else
-    {
-      printf '{\n  "env": {\n'
-      first_entry=1
-      for k in "${ANTHROPIC_KEYS[@]}"; do
-        val="${!k:-}"
-        [[ -z "$val" ]] && continue
-        if [[ "$first_entry" -eq 0 ]]; then
-          printf ',\n'
-        fi
-        printf '    "%s": "%s"' "$k" "$(json_escape_string "$val")"
-        first_entry=0
-      done
-      printf '\n  }\n}\n'
-    } >"$CLAUDE_TMP"
-  fi
-  write_user_file "$CLAUDE_SETTINGS_FILE" 0600 <"$CLAUDE_TMP" || true
-  rm -f -- "$CLAUDE_TMP"
 fi

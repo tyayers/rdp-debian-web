@@ -40,10 +40,10 @@ PORT=8080
 SESSION_SECRET=replace-with-openssl-rand-hex-32
 # Optional: allow WebSocket connections from multiple domains (comma-separated)
 # ALLOWED_ORIGINS=https://iap-domain.example.com,https://direct-domain.example.com
-# Optional: Antigravity enterprise gateway (writes ~/.antigravity/settings.json on login)
+# Optional: Antigravity enterprise gateway (writes /etc/antigravity/admin_settings.json on startup)
 # ANTIGRAVITY_URL=https://your-enterprise-gateway.example.com
 # ANTIGRAVITY_KEY=your-gateway-api-key
-# Optional: Claude Code gateway/model settings (writes ~/.claude/settings.json on login)
+# Optional: Claude Code gateway/model settings (writes /etc/claude-code/managed-settings.json on startup)
 # ANTHROPIC_BASE_URL=https://your-anthropic-gateway.example.com
 # ANTHROPIC_AUTH_TOKEN=
 # ANTHROPIC_API_KEY=
@@ -105,12 +105,11 @@ Because `antigravity-app` leaves `credentials: []` empty in `deployments/antigra
 
 1. In the **Apigee Console** (or via `gcloud` / Apigee API), open **Publish → Apps → `antigravity-app`** (`antigravity-user@example.com`) and copy the generated **Key**.
 2. Set `ANTIGRAVITY_URL` (your deployed `/antigravity` endpoint) and `ANTIGRAVITY_KEY` (the generated key) in `.env`.
-3. Restart the service (`sudo systemctl restart apigee-ai-demos`) so `~/.antigravity/settings.json` is written on user login.
+3. Restart the service (`sudo systemctl restart apigee-ai-demos`) so `/etc/antigravity/admin_settings.json` is written for all VM users.
 
 ## VM Tool Bootstrap & Session Lifecycle (`scripts/on-connect.sh`)
 
-- **Installed once system-wide for everyone (`--system-only`)**: On startup as root, the server ensures **QTerminal**, **PCManFM-Qt**, **FeatherPad**, **LXQt Panel**, **VSCodium** (`codium`, with the **Google Antigravity** extension `Google.google-antigravity` staged from Open VSX and installed per user), **Google Chrome** (`google-chrome-stable`), **Claude Code** (`/usr/local/bin/claude`, with `/etc/claude-code/managed-settings.json` disabling per-user background self-updates), **Claude Desktop with Cowork** (`claude-desktop` from Anthropic's official APT repository along with its QEMU/KVM/virtiofsd/bubblewrap sandbox dependencies and `kvm` group membership for VM users), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed and kept updated at the OS level, and configures `/etc/xrdp/sesman.ini` (`KillDisconnected=true`, `DisconnectedTimeLimit=60`).
-- **Per-user AI gateway settings on login**: When `ANTIGRAVITY_URL`/`ANTIGRAVITY_KEY` or any of `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` are set in `.env`, `scripts/on-connect.sh` writes `~/.antigravity/settings.json` and merges the `ANTHROPIC_*` values into `~/.claude/settings.json` (`0600`) on login.
+- **Installed once system-wide for everyone (`--system-only`)**: On startup as root, the server ensures **QTerminal**, **PCManFM-Qt**, **FeatherPad**, **LXQt Panel**, **VSCodium** (`codium`, with the **Google Antigravity** extension `Google.google-antigravity` staged from Open VSX and installed per user), **Google Chrome** (`google-chrome-stable`), **Claude Code** (`/usr/local/bin/claude`, with `/etc/claude-code/managed-settings.json` rendered from `config/anthropic_settings.json` disabling per-user background self-updates and applying any `ANTHROPIC_*` gateway/model variables from `.env`), **Claude Desktop with Cowork** (`claude-desktop` from Anthropic's official APT repository along with its QEMU/KVM/virtiofsd/bubblewrap sandbox dependencies and `kvm` group membership for VM users), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed and kept updated at the OS level, configures `/etc/xrdp/sesman.ini` (`KillDisconnected=true`, `DisconnectedTimeLimit=60`), and—when `ANTIGRAVITY_URL` and `ANTIGRAVITY_KEY` are set in `.env`—renders `config/antigravity_settings.json` to `/etc/antigravity/admin_settings.json` for system-wide Antigravity enterprise gateway access.
 - **Fresh sign-in on every connect & forced sign-out on disconnect**:
   - Before opening a new `xrdp` connection, `scripts/on-connect.sh <username> <homedir>` ensures the user belongs to the `kvm` group (when present, for Claude Cowork's local VM sandbox) and terminates any lingering `xrdp` / `LXQt` graphical session for that user first (leaving SSH sessions untouched) so `xrdp-sesman` always performs a clean desktop sign-in.
   - Whenever the user disconnects (closes the browser tab, reloads, clicks **Disconnect**, or signs out), the server immediately runs `scripts/on-connect.sh --signout <username>` to sign out their desktop session.

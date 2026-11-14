@@ -4,7 +4,8 @@ import path from "node:path";
 import type { AppConfig } from "./config.ts";
 import { POSIX_USERNAME_RE, RESERVED_USERNAMES } from "./auth.ts";
 import {
-  EMBEDDED_ANTIGRAVITY_ADMIN_SETTINGS_JSON,
+  EMBEDDED_ANTHROPIC_SETTINGS_JSON,
+  EMBEDDED_ANTIGRAVITY_SETTINGS_JSON,
   EMBEDDED_ON_CONNECT_SCRIPT,
   EMBEDDED_WALLPAPER_JPG,
 } from "./embedded-assets.ts";
@@ -408,7 +409,8 @@ export class VmUserManager {
   private async resolveOnConnectAssets(): Promise<{
     scriptPath: string;
     wallpaperPath: string;
-    antigravityAdminSettingsPath: string;
+    antigravitySettingsPath: string;
+    anthropicSettingsPath: string;
   }> {
     let scriptPath = this.config.onConnectScript!;
     const preferEmbedded =
@@ -431,16 +433,30 @@ export class VmUserManager {
       wallpaperPath = fallbackWallpaper;
     }
 
-    let antigravityAdminSettingsPath = path.join(this.config.configDir, "admin_settings.json");
-    if (preferEmbedded || !(await Bun.file(antigravityAdminSettingsPath).exists())) {
+    let antigravitySettingsPath = path.join(this.config.configDir, "antigravity_settings.json");
+    if (preferEmbedded || !(await Bun.file(antigravitySettingsPath).exists())) {
       await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o755 });
-      const fallbackAdminSettings = path.join(this.config.dataDir, "admin_settings.json");
-      const text = await Bun.file(EMBEDDED_ANTIGRAVITY_ADMIN_SETTINGS_JSON).text();
-      await fs.writeFile(fallbackAdminSettings, text, { mode: 0o644 });
-      antigravityAdminSettingsPath = fallbackAdminSettings;
+      const fallbackAgSettings = path.join(this.config.dataDir, "antigravity_settings.json");
+      const text = await Bun.file(EMBEDDED_ANTIGRAVITY_SETTINGS_JSON).text();
+      await fs.writeFile(fallbackAgSettings, text, { mode: 0o644 });
+      antigravitySettingsPath = fallbackAgSettings;
     }
 
-    return { scriptPath, wallpaperPath, antigravityAdminSettingsPath };
+    let anthropicSettingsPath = path.join(this.config.configDir, "anthropic_settings.json");
+    if (preferEmbedded || !(await Bun.file(anthropicSettingsPath).exists())) {
+      await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o755 });
+      const fallbackAnthropicSettings = path.join(this.config.dataDir, "anthropic_settings.json");
+      const text = await Bun.file(EMBEDDED_ANTHROPIC_SETTINGS_JSON).text();
+      await fs.writeFile(fallbackAnthropicSettings, text, { mode: 0o644 });
+      anthropicSettingsPath = fallbackAnthropicSettings;
+    }
+
+    return {
+      scriptPath,
+      wallpaperPath,
+      antigravitySettingsPath,
+      anthropicSettingsPath,
+    };
   }
 
   /**
@@ -451,7 +467,7 @@ export class VmUserManager {
       return;
     }
 
-    const { scriptPath, wallpaperPath, antigravityAdminSettingsPath } =
+    const { scriptPath, wallpaperPath, antigravitySettingsPath, anthropicSettingsPath } =
       await this.resolveOnConnectAssets();
     const argv = [
       ...(this.config.useSudo ? ["sudo", "-n"] : []),
@@ -467,7 +483,8 @@ export class VmUserManager {
       env: {
         ...process.env,
         ON_CONNECT_WALLPAPER_SRC: wallpaperPath,
-        ON_CONNECT_ANTIGRAVITY_ADMIN_SETTINGS_SRC: antigravityAdminSettingsPath,
+        ON_CONNECT_ANTIGRAVITY_ADMIN_SETTINGS_SRC: antigravitySettingsPath,
+        ON_CONNECT_ANTHROPIC_SETTINGS_SRC: anthropicSettingsPath,
       },
     });
 
@@ -532,7 +549,7 @@ export class VmUserManager {
       homeDir = sys.homeDir;
     }
 
-    const { scriptPath, wallpaperPath, antigravityAdminSettingsPath } =
+    const { scriptPath, wallpaperPath, antigravitySettingsPath, anthropicSettingsPath } =
       await this.resolveOnConnectAssets();
 
     const useSudo = this.config.useSudo && !options?.homeDirOverride;
@@ -545,7 +562,8 @@ export class VmUserManager {
       env: {
         ...process.env,
         ON_CONNECT_WALLPAPER_SRC: wallpaperPath,
-        ON_CONNECT_ANTIGRAVITY_ADMIN_SETTINGS_SRC: antigravityAdminSettingsPath,
+        ON_CONNECT_ANTIGRAVITY_ADMIN_SETTINGS_SRC: antigravitySettingsPath,
+        ON_CONNECT_ANTHROPIC_SETTINGS_SRC: anthropicSettingsPath,
         ...(options?.envOverrides ?? {}),
       },
     });

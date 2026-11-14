@@ -669,12 +669,17 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
     expect(sessionConf).toContain('layout="us,de,fr,es"');
     expect(tint2Conf).toContain("background_color = #000000 0");
     expect(tint2Conf).toContain("launcher_icon_size = 48");
-    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "google-chrome.desktop")}`);
-    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "apigee-user-home.desktop")}`);
-    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "featherpad.desktop")}`);
-    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "antigravity.desktop")}`);
-    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(mockAppsDir, "com.anthropic.Claude.desktop")}`);
-    expect(tint2Conf).toContain(`launcher_item_app = ${path.join(freshHome, ".local", "share", "applications", "apigee-settings.desktop")}`);
+    expect(tint2Conf).toContain(
+      [
+        `launcher_item_app = ${path.join(mockAppsDir, "google-chrome.desktop")}`,
+        `launcher_item_app = ${path.join(mockAppsDir, "apigee-user-home.desktop")}`,
+        `launcher_item_app = ${path.join(mockAppsDir, "antigravity.desktop")}`,
+        `launcher_item_app = ${path.join(mockAppsDir, "com.anthropic.Claude.desktop")}`,
+        `launcher_item_app = ${path.join(mockAppsDir, "qterminal.desktop")}`,
+        `launcher_item_app = ${path.join(freshHome, ".local", "share", "applications", "apigee-settings.desktop")}`,
+      ].join("\n")
+    );
+    expect(tint2Conf).not.toContain("featherpad.desktop");
     const settingsLauncher = await fs.readFile(
       path.join(freshHome, ".local", "share", "applications", "apigee-settings.desktop"),
       "utf8"
@@ -1037,22 +1042,21 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
     simulatedCpu5m = 18.5;
   });
 
-  test("writes ~/.antigravity/settings.json and ~/.claude/settings.json on login when env vars are set", async () => {
-    const settingsTestDir = path.join(tmpDir, "user-ai-settings");
-    const mockAppsDir = path.join(settingsTestDir, "apps");
-    const userHome = path.join(settingsTestDir, "home");
-    const agTargetFile = path.join(userHome, ".antigravity", "settings.json");
-    const claudeTargetFile = path.join(userHome, ".claude", "settings.json");
-    await fs.mkdir(mockAppsDir, { recursive: true });
-    await fs.mkdir(userHome, { recursive: true });
+  test("renders config/antigravity_settings.json and config/anthropic_settings.json to admin MDM directories", async () => {
+    const mdmTestDir = path.join(tmpDir, "mdm-ai-settings");
+    const agEtcDir = path.join(mdmTestDir, "etc-antigravity");
+    const claudeEtcDir = path.join(mdmTestDir, "etc-claude-code");
+    const agTargetFile = path.join(agEtcDir, "admin_settings.json");
+    const claudeTargetFile = path.join(claudeEtcDir, "managed-settings.json");
 
-    // 1. Omitted env vars -> neither settings file is created
+    // 1. Omitted env vars -> Antigravity file is skipped, Claude managed-settings keeps DISABLE_AUTOUPDATER only
     const skipProc = Bun.spawn(
-      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "aiuser", userHome],
+      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "--configure-ai-settings-only"],
       {
         env: {
           ...process.env,
-          ON_CONNECT_APPS_DIR: mockAppsDir,
+          ON_CONNECT_ANTIGRAVITY_ETC_DIR: agEtcDir,
+          ON_CONNECT_CLAUDE_ETC_DIR: claudeEtcDir,
           ANTIGRAVITY_URL: "",
           ANTIGRAVITY_KEY: "",
           ANTHROPIC_BASE_URL: "",
@@ -1068,19 +1072,21 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
     );
     expect(await skipProc.exited).toBe(0);
     expect(await Bun.file(agTargetFile).exists()).toBe(false);
-    expect(await Bun.file(claudeTargetFile).exists()).toBe(false);
+    const claudeDefault = JSON.parse(await fs.readFile(claudeTargetFile, "utf8"));
+    expect(claudeDefault).toEqual({
+      env: {
+        DISABLE_AUTOUPDATER: "1",
+      },
+    });
 
-    // Seed an existing ~/.claude/settings.json to verify existing keys are preserved
-    await fs.mkdir(path.dirname(claudeTargetFile), { recursive: true });
-    await fs.writeFile(claudeTargetFile, JSON.stringify({ theme: "dark", env: { EXISTING_VAR: "keep" } }));
-
-    // 2. Provided env vars -> writes ~/.antigravity/settings.json and merges into ~/.claude/settings.json
+    // 2. Provided env vars -> renders both MDM files from config/*.json templates
     const writeProc = Bun.spawn(
-      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "aiuser", userHome],
+      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "--configure-ai-settings-only"],
       {
         env: {
           ...process.env,
-          ON_CONNECT_APPS_DIR: mockAppsDir,
+          ON_CONNECT_ANTIGRAVITY_ETC_DIR: agEtcDir,
+          ON_CONNECT_CLAUDE_ETC_DIR: claudeEtcDir,
           ANTIGRAVITY_URL: "https://gateway.example.com/v1?a=1&b=2",
           ANTIGRAVITY_KEY: 'ag-key-"special"\\test',
           ANTHROPIC_BASE_URL: "https://anthropic-gw.example.com",
@@ -1107,9 +1113,8 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
 
     const claudeRendered = JSON.parse(await fs.readFile(claudeTargetFile, "utf8"));
     expect(claudeRendered).toEqual({
-      theme: "dark",
       env: {
-        EXISTING_VAR: "keep",
+        DISABLE_AUTOUPDATER: "1",
         ANTHROPIC_BASE_URL: "https://anthropic-gw.example.com",
         ANTHROPIC_AUTH_TOKEN: "tok-123",
         ANTHROPIC_API_KEY: "key-456",
