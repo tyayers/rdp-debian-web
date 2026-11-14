@@ -1037,49 +1037,140 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
     simulatedCpu5m = 18.5;
   });
 
-  test("configures /etc/antigravity/admin_settings.json from config/admin_settings.json when ANTIGRAVITY_URL and ANTIGRAVITY_KEY are set", async () => {
-    const agEtcDir = path.join(tmpDir, "antigravity-etc");
-    const targetFile = path.join(agEtcDir, "admin_settings.json");
+  test("writes ~/.antigravity/settings.json and ~/.claude/settings.json on login when env vars are set", async () => {
+    const settingsTestDir = path.join(tmpDir, "user-ai-settings");
+    const mockAppsDir = path.join(settingsTestDir, "apps");
+    const userHome = path.join(settingsTestDir, "home");
+    const agTargetFile = path.join(userHome, ".antigravity", "settings.json");
+    const claudeTargetFile = path.join(userHome, ".claude", "settings.json");
+    await fs.mkdir(mockAppsDir, { recursive: true });
+    await fs.mkdir(userHome, { recursive: true });
 
-    // 1. Omitted env vars -> does not write admin_settings.json
+    // 1. Omitted env vars -> neither settings file is created
     const skipProc = Bun.spawn(
-      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "--configure-antigravity-only"],
+      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "aiuser", userHome],
       {
         env: {
           ...process.env,
-          ON_CONNECT_ANTIGRAVITY_ETC_DIR: agEtcDir,
+          ON_CONNECT_APPS_DIR: mockAppsDir,
           ANTIGRAVITY_URL: "",
           ANTIGRAVITY_KEY: "",
+          ANTHROPIC_BASE_URL: "",
+          ANTHROPIC_AUTH_TOKEN: "",
+          ANTHROPIC_API_KEY: "",
+          ANTHROPIC_DEFAULT_OPUS_MODEL: "",
+          ANTHROPIC_DEFAULT_SONNET_MODEL: "",
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: "",
         },
         stdout: "pipe",
         stderr: "pipe",
       }
     );
     expect(await skipProc.exited).toBe(0);
-    expect(await Bun.file(targetFile).exists()).toBe(false);
+    expect(await Bun.file(agTargetFile).exists()).toBe(false);
+    expect(await Bun.file(claudeTargetFile).exists()).toBe(false);
 
-    // 2. Provided env vars -> renders config/admin_settings.json with url & apiKey
+    // Seed an existing ~/.claude/settings.json to verify existing keys are preserved
+    await fs.mkdir(path.dirname(claudeTargetFile), { recursive: true });
+    await fs.writeFile(claudeTargetFile, JSON.stringify({ theme: "dark", env: { EXISTING_VAR: "keep" } }));
+
+    // 2. Provided env vars -> writes ~/.antigravity/settings.json and merges into ~/.claude/settings.json
     const writeProc = Bun.spawn(
-      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "--configure-antigravity-only"],
+      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "aiuser", userHome],
       {
         env: {
           ...process.env,
-          ON_CONNECT_ANTIGRAVITY_ETC_DIR: agEtcDir,
+          ON_CONNECT_APPS_DIR: mockAppsDir,
           ANTIGRAVITY_URL: "https://gateway.example.com/v1?a=1&b=2",
           ANTIGRAVITY_KEY: 'ag-key-"special"\\test',
+          ANTHROPIC_BASE_URL: "https://anthropic-gw.example.com",
+          ANTHROPIC_AUTH_TOKEN: "tok-123",
+          ANTHROPIC_API_KEY: "key-456",
+          ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-4",
+          ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-4",
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4",
         },
         stdout: "pipe",
         stderr: "pipe",
       }
     );
     expect(await writeProc.exited).toBe(0);
-    const rendered = JSON.parse(await fs.readFile(targetFile, "utf8"));
-    expect(rendered).toEqual({
+
+    const agRendered = JSON.parse(await fs.readFile(agTargetFile, "utf8"));
+    expect(agRendered).toEqual({
       gateway: {
         enabled: true,
         url: "https://gateway.example.com/v1?a=1&b=2",
         apiKey: 'ag-key-"special"\\test',
       },
     });
+
+    const claudeRendered = JSON.parse(await fs.readFile(claudeTargetFile, "utf8"));
+    expect(claudeRendered).toEqual({
+      theme: "dark",
+      env: {
+        EXISTING_VAR: "keep",
+        ANTHROPIC_BASE_URL: "https://anthropic-gw.example.com",
+        ANTHROPIC_AUTH_TOKEN: "tok-123",
+        ANTHROPIC_API_KEY: "key-456",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-4",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-4",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4",
+      },
+    });
+  });
+
+  test("installs staged Google Antigravity VSCodium extension per user when missing and skips if already installed", async () => {
+    const extTestDir = path.join(tmpDir, "codium-ext-test");
+    const mockBinDir = path.join(extTestDir, "bin");
+    const mockExtDir = path.join(extTestDir, "staged");
+    const mockAppsDir = path.join(extTestDir, "apps");
+    const userHome = path.join(extTestDir, "home");
+    const installLog = path.join(extTestDir, "codium-install.log");
+
+    await fs.mkdir(mockBinDir, { recursive: true });
+    await fs.mkdir(mockExtDir, { recursive: true });
+    await fs.mkdir(mockAppsDir, { recursive: true });
+    await fs.mkdir(userHome, { recursive: true });
+
+    const stagedVsix = path.join(mockExtDir, "Google.google-antigravity.vsix");
+    await fs.writeFile(stagedVsix, "fake-vsix-content");
+
+    const mockCodium = path.join(mockBinDir, "codium");
+    await fs.writeFile(
+      mockCodium,
+      `#!/usr/bin/env bash
+echo "$@" >> ${JSON.stringify(installLog)}
+mkdir -p "${userHome}/.vscode-oss/extensions/google.google-antigravity-1.12.0"
+`
+    );
+    await fs.chmod(mockCodium, 0o755);
+
+    const runConnect = async () => {
+      const proc = Bun.spawn(
+        ["/bin/bash", path.resolve("scripts/on-connect.sh"), "extuser", userHome],
+        {
+          env: {
+            ...process.env,
+            PATH: `${mockBinDir}:${process.env.PATH ?? ""}`,
+            ON_CONNECT_APPS_DIR: mockAppsDir,
+            ON_CONNECT_CODIUM_EXT_DIR: mockExtDir,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+      expect(await proc.exited).toBe(0);
+    };
+
+    await runConnect();
+    const logAfterFirst = await fs.readFile(installLog, "utf8");
+    expect(logAfterFirst).toContain(`--install-extension ${stagedVsix}`);
+    expect(logAfterFirst.trim().split("\n").length).toBe(1);
+
+    // Second run should skip since google.google-antigravity-* already exists
+    await runConnect();
+    const logAfterSecond = await fs.readFile(installLog, "utf8");
+    expect(logAfterSecond.trim().split("\n").length).toBe(1);
   });
 });

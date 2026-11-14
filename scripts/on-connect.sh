@@ -190,9 +190,8 @@ json_escape_string() {
   printf '%s' "$s"
 }
 
-configure_antigravity_admin_settings() {
-  local antigravity_etc_dir="${ON_CONNECT_ANTIGRAVITY_ETC_DIR:-/etc/antigravity}"
-  local target_file="${antigravity_etc_dir}/admin_settings.json"
+render_antigravity_settings_to() {
+  local target_file="$1"
   local ag_url="${ANTIGRAVITY_URL:-}"
   local ag_key="${ANTIGRAVITY_KEY:-}"
 
@@ -205,9 +204,8 @@ configure_antigravity_admin_settings() {
     return 0
   fi
 
-  install -d -m 0755 "$antigravity_etc_dir"
   local tmp_out
-  tmp_out="$(mktemp "${TMPDIR:-/tmp}/antigravity-admin-settings.XXXXXX")"
+  tmp_out="$(mktemp "${TMPDIR:-/tmp}/antigravity-settings.XXXXXX")"
 
   if command -v python3 >/dev/null 2>&1; then
     TEMPLATE_PATH="$ANTIGRAVITY_ADMIN_SETTINGS_SRC" \
@@ -241,12 +239,8 @@ PY
     ' "$ANTIGRAVITY_ADMIN_SETTINGS_SRC" >"$tmp_out"
   fi
 
-  chmod 0644 "$tmp_out"
-  if [[ "$(id -u)" -eq 0 ]]; then
-    chown root:root -- "$tmp_out"
-  fi
-  mv -f -- "$tmp_out" "$target_file"
-  echo "[on-connect] Configured Antigravity enterprise gateway -> ${target_file}"
+  write_user_file "$target_file" 0600 <"$tmp_out" || true
+  rm -f -- "$tmp_out"
 }
 
 find_existing_desktop() {
@@ -382,6 +376,33 @@ EOF
     apt_get install -y -qq codium
   fi
 
+  # 1b-ext. Stage Google Antigravity VSCodium extension (.vsix from Open VSX) for per-user install
+  local codium_ext_dir="${ON_CONNECT_CODIUM_EXT_DIR:-/usr/local/share/codium-extensions}"
+  local ag_ext_api_url="${ON_CONNECT_ANTIGRAVITY_EXT_API_URL:-https://open-vsx.org/api/Google/google-antigravity}"
+  local ag_vsix_path="${codium_ext_dir}/Google.google-antigravity.vsix"
+  local ag_ext_ver_file="${codium_ext_dir}/Google.google-antigravity.version"
+  install -d -m 0755 "$codium_ext_dir"
+  local ag_ext_meta ag_ext_ver ag_ext_dl staged_ag_ext_ver=""
+  ag_ext_meta="$(curl -fsSL --max-time 8 "$ag_ext_api_url" 2>/dev/null || true)"
+  if [[ -n "$ag_ext_meta" ]]; then
+    ag_ext_ver="$(parse_json_string "$ag_ext_meta" "version")"
+    ag_ext_dl="$(parse_json_string "$ag_ext_meta" "download")"
+    [[ -f "$ag_ext_ver_file" ]] && staged_ag_ext_ver="$(tr -d '[:space:]' <"$ag_ext_ver_file" 2>/dev/null || true)"
+    if [[ -n "$ag_ext_ver" && -n "$ag_ext_dl" ]] && { [[ ! -s "$ag_vsix_path" || "$staged_ag_ext_ver" != "$ag_ext_ver" ]]; }; then
+      echo "[status] Staging Google Antigravity VSCodium extension v${ag_ext_ver}..."
+      local ag_vsix_tmp="${ag_vsix_path}.tmp.$$"
+      if curl -fsSL --max-time 30 -o "$ag_vsix_tmp" "$ag_ext_dl" 2>/dev/null && [[ -s "$ag_vsix_tmp" ]]; then
+        chmod 0644 "$ag_vsix_tmp"
+        mv -f -- "$ag_vsix_tmp" "$ag_vsix_path"
+        printf '%s\n' "$ag_ext_ver" >"$ag_ext_ver_file"
+        chmod 0644 "$ag_ext_ver_file"
+        echo "[on-connect] Staged Google Antigravity VSCodium extension v${ag_ext_ver} -> ${ag_vsix_path}"
+      else
+        rm -f -- "$ag_vsix_tmp"
+      fi
+    fi
+  fi
+
   # 1c. Google Chrome (google-chrome-stable on amd64; chromium fallback on arm64)
   if ! command -v google-chrome-stable >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then
     echo "[status] Installing Google Chrome..."
@@ -405,13 +426,10 @@ EOF
     /usr/local/share/antigravity \
     /usr/local/share/claude-code \
     /etc/claude-code \
-    /etc/antigravity \
     /usr/share/pixmaps \
     /usr/share/icons/hicolor/256x256/apps \
     /usr/share/applications \
     /usr/share/backgrounds
-
-  configure_antigravity_admin_settings
 
   # Shared official Antigravity icon (installed into both pixmaps and hicolor theme for QIcon::fromTheme)
   if [[ ! -s /usr/share/pixmaps/antigravity.png ]]; then
@@ -1088,11 +1106,6 @@ if [[ "${1:-}" == "--install-claude-code-only" ]]; then
     aarch64|arm64) TEST_ARCH="arm64" ;;
   esac
   install_or_update_claude_code "${2:-$TEST_ARCH}"
-  exit 0
-fi
-
-if [[ "${1:-}" == "--configure-antigravity-only" ]]; then
-  configure_antigravity_admin_settings
   exit 0
 fi
 
@@ -1823,4 +1836,107 @@ if [[ -x "$SYS_CLAUDE_BIN" && -e "$HOMEDIR/.local/bin/claude" && ! -L "$HOMEDIR/
   if [[ "$(id -u)" -eq 0 ]]; then
     chown -h "$USER_UID:$USER_GID" -- "$HOMEDIR/.local/bin/claude"
   fi
+fi
+
+# Install Google Antigravity VSCodium extension per user if not already present
+CODIUM_EXT_DIR="${ON_CONNECT_CODIUM_EXT_DIR:-/usr/local/share/codium-extensions}"
+CODIUM_AG_VSIX="${CODIUM_EXT_DIR}/Google.google-antigravity.vsix"
+if command -v codium >/dev/null 2>&1 && [[ -s "$CODIUM_AG_VSIX" ]]; then
+  if ! compgen -G "$HOMEDIR/.vscode-oss/extensions/google.google-antigravity-*" >/dev/null 2>&1; then
+    echo "[status] Installing Google Antigravity extension in VSCodium..."
+    ensure_user_dir "$HOMEDIR/.config/VSCodium"
+    ensure_user_dir "$HOMEDIR/.vscode-oss"
+    ensure_user_dir "$HOMEDIR/.vscode-oss/extensions"
+    HOME="$HOMEDIR" codium \
+      --no-sandbox \
+      --user-data-dir "$HOMEDIR/.config/VSCodium" \
+      --extensions-dir "$HOMEDIR/.vscode-oss/extensions" \
+      --install-extension "$CODIUM_AG_VSIX" >/dev/null 2>&1 || true
+    if [[ "$(id -u)" -eq 0 ]]; then
+      chown -R "$USER_UID:$USER_GID" -- "$HOMEDIR/.config/VSCodium" "$HOMEDIR/.vscode-oss" 2>/dev/null || true
+    fi
+  fi
+fi
+
+# Write per-user Antigravity settings (~/.antigravity/settings.json) when ANTIGRAVITY_URL and ANTIGRAVITY_KEY are set
+if [[ -n "${ANTIGRAVITY_URL:-}" && -n "${ANTIGRAVITY_KEY:-}" ]]; then
+  ensure_user_dir "$HOMEDIR/.antigravity"
+  render_antigravity_settings_to "$HOMEDIR/.antigravity/settings.json"
+fi
+
+# Write/merge per-user Claude Code settings (~/.claude/settings.json) when ANTHROPIC_* env vars are set
+ANTHROPIC_KEYS=(
+  ANTHROPIC_BASE_URL
+  ANTHROPIC_AUTH_TOKEN
+  ANTHROPIC_API_KEY
+  ANTHROPIC_DEFAULT_OPUS_MODEL
+  ANTHROPIC_DEFAULT_SONNET_MODEL
+  ANTHROPIC_DEFAULT_HAIKU_MODEL
+)
+HAS_ANTHROPIC_ENV=0
+for k in "${ANTHROPIC_KEYS[@]}"; do
+  if [[ -n "${!k:-}" ]]; then
+    HAS_ANTHROPIC_ENV=1
+    break
+  fi
+done
+if [[ "$HAS_ANTHROPIC_ENV" -eq 1 ]]; then
+  ensure_user_dir "$HOMEDIR/.claude"
+  CLAUDE_SETTINGS_FILE="$HOMEDIR/.claude/settings.json"
+  CLAUDE_TMP="$(mktemp "${TMPDIR:-/tmp}/claude-settings.XXXXXX")"
+  if command -v python3 >/dev/null 2>&1; then
+    CLAUDE_TARGET="$CLAUDE_SETTINGS_FILE" CLAUDE_TMP_OUT="$CLAUDE_TMP" python3 - <<'PY'
+import json, os
+
+keys = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+]
+target = os.environ["CLAUDE_TARGET"]
+data = {}
+if os.path.isfile(target):
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+    except Exception:
+        data = {}
+
+env_obj = data.get("env")
+if not isinstance(env_obj, dict):
+    env_obj = {}
+
+for k in keys:
+    val = os.environ.get(k, "")
+    if val:
+        env_obj[k] = val
+
+data["env"] = env_obj
+with open(os.environ["CLAUDE_TMP_OUT"], "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+  else
+    {
+      printf '{\n  "env": {\n'
+      first_entry=1
+      for k in "${ANTHROPIC_KEYS[@]}"; do
+        val="${!k:-}"
+        [[ -z "$val" ]] && continue
+        if [[ "$first_entry" -eq 0 ]]; then
+          printf ',\n'
+        fi
+        printf '    "%s": "%s"' "$k" "$(json_escape_string "$val")"
+        first_entry=0
+      done
+      printf '\n  }\n}\n'
+    } >"$CLAUDE_TMP"
+  fi
+  write_user_file "$CLAUDE_SETTINGS_FILE" 0600 <"$CLAUDE_TMP" || true
+  rm -f -- "$CLAUDE_TMP"
 fi
