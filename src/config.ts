@@ -21,6 +21,7 @@ export interface AppConfig {
   maxConnectCpuAvg5m: number;
   usersFile: string;
   dataDir: string;
+  configDir: string;
   publicDir: string;
 }
 
@@ -94,6 +95,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxConnectCpuAvg5m,
     usersFile,
     dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : path.join(baseDir, "data"),
+    configDir: path.join(baseDir, "config"),
     publicDir: path.join(baseDir, "public"),
   };
 }

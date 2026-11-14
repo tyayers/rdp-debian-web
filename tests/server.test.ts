@@ -1036,4 +1036,50 @@ describe("Apigee AI Journeys — GCP IAP / ?user= Auth, users.yaml Auto-Provisio
     ws.close();
     simulatedCpu5m = 18.5;
   });
+
+  test("configures /etc/antigravity/admin_settings.json from config/admin_settings.json when ANTIGRAVITY_URL and ANTIGRAVITY_KEY are set", async () => {
+    const agEtcDir = path.join(tmpDir, "antigravity-etc");
+    const targetFile = path.join(agEtcDir, "admin_settings.json");
+
+    // 1. Omitted env vars -> does not write admin_settings.json
+    const skipProc = Bun.spawn(
+      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "--configure-antigravity-only"],
+      {
+        env: {
+          ...process.env,
+          ON_CONNECT_ANTIGRAVITY_ETC_DIR: agEtcDir,
+          ANTIGRAVITY_URL: "",
+          ANTIGRAVITY_KEY: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    expect(await skipProc.exited).toBe(0);
+    expect(await Bun.file(targetFile).exists()).toBe(false);
+
+    // 2. Provided env vars -> renders config/admin_settings.json with url & apiKey
+    const writeProc = Bun.spawn(
+      ["/bin/bash", path.resolve("scripts/on-connect.sh"), "--configure-antigravity-only"],
+      {
+        env: {
+          ...process.env,
+          ON_CONNECT_ANTIGRAVITY_ETC_DIR: agEtcDir,
+          ANTIGRAVITY_URL: "https://gateway.example.com/v1?a=1&b=2",
+          ANTIGRAVITY_KEY: 'ag-key-"special"\\test',
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    expect(await writeProc.exited).toBe(0);
+    const rendered = JSON.parse(await fs.readFile(targetFile, "utf8"));
+    expect(rendered).toEqual({
+      gateway: {
+        enabled: true,
+        url: "https://gateway.example.com/v1?a=1&b=2",
+        apiKey: 'ag-key-"special"\\test',
+      },
+    });
+  });
 });

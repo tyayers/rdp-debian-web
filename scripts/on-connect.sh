@@ -16,6 +16,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_WALLPAPER_SRC="$SCRIPT_DIR/../public/wallpaper.jpg"
 WALLPAPER_SRC="${ON_CONNECT_WALLPAPER_SRC:-$DEFAULT_WALLPAPER_SRC}"
+DEFAULT_ANTIGRAVITY_ADMIN_SETTINGS_SRC="$SCRIPT_DIR/../config/admin_settings.json"
+ANTIGRAVITY_ADMIN_SETTINGS_SRC="${ON_CONNECT_ANTIGRAVITY_ADMIN_SETTINGS_SRC:-$DEFAULT_ANTIGRAVITY_ADMIN_SETTINGS_SRC}"
 APPS_DIR="${ON_CONNECT_APPS_DIR:-/usr/share/applications}"
 
 parse_json_string() {
@@ -178,6 +180,75 @@ EOF
   fi
 }
 
+json_escape_string() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+configure_antigravity_admin_settings() {
+  local antigravity_etc_dir="${ON_CONNECT_ANTIGRAVITY_ETC_DIR:-/etc/antigravity}"
+  local target_file="${antigravity_etc_dir}/admin_settings.json"
+  local ag_url="${ANTIGRAVITY_URL:-}"
+  local ag_key="${ANTIGRAVITY_KEY:-}"
+
+  if [[ -z "$ag_url" || -z "$ag_key" ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "$ANTIGRAVITY_ADMIN_SETTINGS_SRC" ]]; then
+    echo "[on-connect] Warning: Antigravity admin_settings.json template not found at $ANTIGRAVITY_ADMIN_SETTINGS_SRC" >&2
+    return 0
+  fi
+
+  install -d -m 0755 "$antigravity_etc_dir"
+  local tmp_out
+  tmp_out="$(mktemp "${TMPDIR:-/tmp}/antigravity-admin-settings.XXXXXX")"
+
+  if command -v python3 >/dev/null 2>&1; then
+    TEMPLATE_PATH="$ANTIGRAVITY_ADMIN_SETTINGS_SRC" \
+    OUT_PATH="$tmp_out" \
+    AG_URL="$ag_url" \
+    AG_KEY="$ag_key" \
+    python3 - <<'PY'
+import json, os
+
+with open(os.environ["TEMPLATE_PATH"], "r", encoding="utf-8") as f:
+    raw = f.read()
+
+url_escaped = json.dumps(os.environ["AG_URL"])[1:-1]
+key_escaped = json.dumps(os.environ["AG_KEY"])[1:-1]
+rendered = raw.replace("__ANTIGRAVITY_URL__", url_escaped).replace("__ANTIGRAVITY_KEY__", key_escaped)
+# Validate JSON before writing
+json.loads(rendered)
+with open(os.environ["OUT_PATH"], "w", encoding="utf-8") as f:
+    f.write(rendered)
+PY
+  else
+    local url_escaped key_escaped
+    url_escaped="$(json_escape_string "$ag_url")"
+    key_escaped="$(json_escape_string "$ag_key")"
+    AG_URL_ESC="$url_escaped" AG_KEY_ESC="$key_escaped" awk '
+      {
+        gsub(/__ANTIGRAVITY_URL__/, ENVIRON["AG_URL_ESC"])
+        gsub(/__ANTIGRAVITY_KEY__/, ENVIRON["AG_KEY_ESC"])
+        print
+      }
+    ' "$ANTIGRAVITY_ADMIN_SETTINGS_SRC" >"$tmp_out"
+  fi
+
+  chmod 0644 "$tmp_out"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown root:root -- "$tmp_out"
+  fi
+  mv -f -- "$tmp_out" "$target_file"
+  echo "[on-connect] Configured Antigravity enterprise gateway -> ${target_file}"
+}
+
 find_existing_desktop() {
   local cand
   for cand in "$@"; do
@@ -334,10 +405,13 @@ EOF
     /usr/local/share/antigravity \
     /usr/local/share/claude-code \
     /etc/claude-code \
+    /etc/antigravity \
     /usr/share/pixmaps \
     /usr/share/icons/hicolor/256x256/apps \
     /usr/share/applications \
     /usr/share/backgrounds
+
+  configure_antigravity_admin_settings
 
   # Shared official Antigravity icon (installed into both pixmaps and hicolor theme for QIcon::fromTheme)
   if [[ ! -s /usr/share/pixmaps/antigravity.png ]]; then
@@ -1014,6 +1088,11 @@ if [[ "${1:-}" == "--install-claude-code-only" ]]; then
     aarch64|arm64) TEST_ARCH="arm64" ;;
   esac
   install_or_update_claude_code "${2:-$TEST_ARCH}"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--configure-antigravity-only" ]]; then
+  configure_antigravity_admin_settings
   exit 0
 fi
 

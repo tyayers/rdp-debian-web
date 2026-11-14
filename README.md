@@ -40,6 +40,9 @@ PORT=8080
 SESSION_SECRET=replace-with-openssl-rand-hex-32
 # Optional: allow WebSocket connections from multiple domains (comma-separated)
 # ALLOWED_ORIGINS=https://iap-domain.example.com,https://direct-domain.example.com
+# Optional: Antigravity enterprise gateway (writes /etc/antigravity/admin_settings.json on startup)
+# ANTIGRAVITY_URL=https://your-enterprise-gateway.example.com
+# ANTIGRAVITY_KEY=your-gateway-api-key
 ```
 
 ### 3. Start the Server
@@ -79,9 +82,27 @@ sudo journalctl -u apigee-ai-demos -f
 sudo ./scripts/systemd-service.sh deregister
 ```
 
+## Antigravity Enterprise Gateway (`aft` Deployment)
+
+`deployments/antigravity-deployment.yaml` defines an [`aft`](https://github.com/apigee/apigee-templater) deployment that deploys the `REST-AI-Antigravity.yaml` template from `apigee-template-repository` along with the `antigravity-product` API product and `antigravity-user@example.com` developer app (`antigravity-app`):
+
+```bash
+# Deploy to Apigee X
+aft deployments/antigravity-deployment.yaml --project <your-gcp-project> --environment <env>
+
+# Or deploy to an Apigee Emulator
+aft deployments/antigravity-deployment.yaml -f emulator -o http://localhost:8083 -e default-dev
+```
+
+Because `antigravity-app` leaves `credentials: []` empty in `deployments/antigravity-deployment.yaml`, Apigee automatically generates a secure consumer key/secret on creation. After deploying:
+
+1. In the **Apigee Console** (or via `gcloud` / Apigee API), open **Publish → Apps → `antigravity-app`** (`antigravity-user@example.com`) and copy the generated **Key**.
+2. Set `ANTIGRAVITY_URL` (your deployed `/antigravity` endpoint) and `ANTIGRAVITY_KEY` (the generated key) in `.env`.
+3. Restart the service (`sudo systemctl restart apigee-ai-demos`) so `/etc/antigravity/admin_settings.json` is written for all VM users.
+
 ## VM Tool Bootstrap & Session Lifecycle (`scripts/on-connect.sh`)
 
-- **Installed once system-wide for everyone (`--system-only`)**: On startup as root, the server ensures **QTerminal**, **PCManFM-Qt**, **FeatherPad**, **LXQt Panel**, **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), **Claude Code** (`/usr/local/bin/claude`, with `/etc/claude-code/managed-settings.json` disabling per-user background self-updates), **Claude Desktop with Cowork** (`claude-desktop` from Anthropic's official APT repository along with its QEMU/KVM/virtiofsd/bubblewrap sandbox dependencies and `kvm` group membership for VM users), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed and kept updated at the OS level, and configures `/etc/xrdp/sesman.ini` (`KillDisconnected=true`, `DisconnectedTimeLimit=60`).
+- **Installed once system-wide for everyone (`--system-only`)**: On startup as root, the server ensures **QTerminal**, **PCManFM-Qt**, **FeatherPad**, **LXQt Panel**, **VSCodium** (`codium`), **Google Chrome** (`google-chrome-stable`), **Claude Code** (`/usr/local/bin/claude`, with `/etc/claude-code/managed-settings.json` disabling per-user background self-updates), **Claude Desktop with Cowork** (`claude-desktop` from Anthropic's official APT repository along with its QEMU/KVM/virtiofsd/bubblewrap sandbox dependencies and `kvm` group membership for VM users), and the **current latest releases** of the **Antigravity 2.0 desktop app** (`/opt/antigravity`), **Antigravity CLI** (`/usr/local/bin/agy`), and **Antigravity IDE** (`/opt/antigravity-ide`) are installed and kept updated at the OS level, configures `/etc/xrdp/sesman.ini` (`KillDisconnected=true`, `DisconnectedTimeLimit=60`), and—when `ANTIGRAVITY_URL` and `ANTIGRAVITY_KEY` are set in `.env`—renders `config/admin_settings.json` to `/etc/antigravity/admin_settings.json` for system-wide Antigravity enterprise gateway access.
 - **Fresh sign-in on every connect & forced sign-out on disconnect**:
   - Before opening a new `xrdp` connection, `scripts/on-connect.sh <username> <homedir>` ensures the user belongs to the `kvm` group (when present, for Claude Cowork's local VM sandbox) and terminates any lingering `xrdp` / `LXQt` graphical session for that user first (leaving SSH sessions untouched) so `xrdp-sesman` always performs a clean desktop sign-in.
   - Whenever the user disconnects (closes the browser tab, reloads, clicks **Disconnect**, or signs out), the server immediately runs `scripts/on-connect.sh --signout <username>` to sign out their desktop session.

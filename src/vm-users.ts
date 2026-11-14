@@ -3,7 +3,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "./config.ts";
 import { POSIX_USERNAME_RE, RESERVED_USERNAMES } from "./auth.ts";
-import { EMBEDDED_ON_CONNECT_SCRIPT, EMBEDDED_WALLPAPER_JPG } from "./embedded-assets.ts";
+import {
+  EMBEDDED_ANTIGRAVITY_ADMIN_SETTINGS_JSON,
+  EMBEDDED_ON_CONNECT_SCRIPT,
+  EMBEDDED_WALLPAPER_JPG,
+} from "./embedded-assets.ts";
 
 export interface StoredUserEntry {
   email: string;
@@ -401,7 +405,11 @@ export class VmUserManager {
     });
   }
 
-  private async resolveOnConnectAssets(): Promise<{ scriptPath: string; wallpaperPath: string }> {
+  private async resolveOnConnectAssets(): Promise<{
+    scriptPath: string;
+    wallpaperPath: string;
+    antigravityAdminSettingsPath: string;
+  }> {
     let scriptPath = this.config.onConnectScript!;
     const preferEmbedded =
       this.config.isCompiledBinary && !this.config.hasExplicitOnConnectOverride;
@@ -423,7 +431,16 @@ export class VmUserManager {
       wallpaperPath = fallbackWallpaper;
     }
 
-    return { scriptPath, wallpaperPath };
+    let antigravityAdminSettingsPath = path.join(this.config.configDir, "admin_settings.json");
+    if (preferEmbedded || !(await Bun.file(antigravityAdminSettingsPath).exists())) {
+      await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o755 });
+      const fallbackAdminSettings = path.join(this.config.dataDir, "admin_settings.json");
+      const text = await Bun.file(EMBEDDED_ANTIGRAVITY_ADMIN_SETTINGS_JSON).text();
+      await fs.writeFile(fallbackAdminSettings, text, { mode: 0o644 });
+      antigravityAdminSettingsPath = fallbackAdminSettings;
+    }
+
+    return { scriptPath, wallpaperPath, antigravityAdminSettingsPath };
   }
 
   /**
@@ -434,7 +451,8 @@ export class VmUserManager {
       return;
     }
 
-    const { scriptPath, wallpaperPath } = await this.resolveOnConnectAssets();
+    const { scriptPath, wallpaperPath, antigravityAdminSettingsPath } =
+      await this.resolveOnConnectAssets();
     const argv = [
       ...(this.config.useSudo ? ["sudo", "-n"] : []),
       "/bin/bash",
@@ -446,7 +464,11 @@ export class VmUserManager {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, ON_CONNECT_WALLPAPER_SRC: wallpaperPath },
+      env: {
+        ...process.env,
+        ON_CONNECT_WALLPAPER_SRC: wallpaperPath,
+        ON_CONNECT_ANTIGRAVITY_ADMIN_SETTINGS_SRC: antigravityAdminSettingsPath,
+      },
     });
 
     const streamStdout = async () => {
@@ -510,7 +532,8 @@ export class VmUserManager {
       homeDir = sys.homeDir;
     }
 
-    const { scriptPath, wallpaperPath } = await this.resolveOnConnectAssets();
+    const { scriptPath, wallpaperPath, antigravityAdminSettingsPath } =
+      await this.resolveOnConnectAssets();
 
     const useSudo = this.config.useSudo && !options?.homeDirOverride;
     const argv = [...(useSudo ? ["sudo", "-n"] : []), "/bin/bash", scriptPath, username, homeDir];
@@ -522,6 +545,7 @@ export class VmUserManager {
       env: {
         ...process.env,
         ON_CONNECT_WALLPAPER_SRC: wallpaperPath,
+        ON_CONNECT_ANTIGRAVITY_ADMIN_SETTINGS_SRC: antigravityAdminSettingsPath,
         ...(options?.envOverrides ?? {}),
       },
     });

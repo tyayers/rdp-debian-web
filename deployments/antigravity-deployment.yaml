@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/apigee/apigee-templater/main/schema/gateway.schema.1.0.json
+gateway: apigee
+schemaVersion: 1.0.0
+name: antigravity-deployment
+type: deployment
+description: Enterprise AI Gateway deployment for Google Antigravity using REST-AI-Antigravity.
+templates:
+  - REST-AI-Antigravity.yaml
+products:
+  - name: antigravity-product
+    displayName: Antigravity Enterprise Product
+    type: product
+    gateway: apigee
+    schemaVersion: 1.0.0
+    description: API Product granting access to the REST-AI-Antigravity enterprise gateway.
+    access: public
+    approvalType: auto
+    environments:
+      - default-dev
+    proxies:
+      - REST-AI-Antigravity
+    quota: "100000"
+    quotaInterval: "1"
+    quotaTimeUnit: month
+    operations:
+      - apiSource: REST-AI-Antigravity
+        operations:
+          - name: /**
+            methods: []
+            quota: {}
+users:
+  - name: antigravity-user@example.com
+    displayName: Antigravity Enterprise User
+    type: user
+    gateway: apigee
+    schemaVersion: 1.0.0
+    email: antigravity-user@example.com
+    firstName: Antigravity
+    lastName: User
+    userName: antigravity-user@example.com
+    status: active
+    apps:
+      - name: antigravity-app
+        displayName: Antigravity Enterprise App
+        description: Developer app and credential for Antigravity enterprise gateway access
+        status: approved
+        products:
+          - antigravity-product
+        credentials: []

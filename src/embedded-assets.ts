@@ -6,9 +6,11 @@ import wallpaperJpg from "../public/wallpaper.jpg" with { type: "file" };
 import rdpWasmJs from "../public/wasm/rdp_wasm.js" with { type: "file" };
 import rdpWasmBg from "../public/wasm/rdp_wasm_bg.wasm" with { type: "file" };
 import onConnectSh from "../scripts/on-connect.sh" with { type: "file" };
+import antigravityAdminSettingsJson from "../config/admin_settings.json" with { type: "file" };
 
 export const EMBEDDED_ON_CONNECT_SCRIPT: string = onConnectSh;
 export const EMBEDDED_WALLPAPER_JPG: string = wallpaperJpg;
+export const EMBEDDED_ANTIGRAVITY_ADMIN_SETTINGS_JSON: string = antigravityAdminSettingsJson;
 
 export const EMBEDDED_PUBLIC_FILES: Record<string, { filePath: string; contentType: string }> = {
   "/index.html": { filePath: indexHtml, contentType: "text/html; charset=utf-8" },
